@@ -207,6 +207,14 @@ function Activate-Windows {
     slmgr /ato
 }
 
+function Set-SetupComplete {
+    $setupScriptsFolder = Join-Path $env:windir "Setup\Scripts\"
+    if (-not (Test-Path $setupScriptsFolder)) {
+      New-Item -Type Directory $setupScriptsFolder
+    }
+    Copy-Item -Recurse -Force "$resourcesDir\SetupComplete\*" $setupScriptsFolder
+}
+
 try
 {
     Import-Module "$resourcesDir\ini.psm1"
@@ -249,15 +257,13 @@ try
     $CloudbaseInitMsiLog = "$resourcesDir\CloudbaseInit.log"
 
     $serialPortName = @(Get-WmiObject Win32_SerialPort)[0].DeviceId
-
-    $p = Start-Process -Wait -PassThru -FilePath msiexec -ArgumentList "/i $CloudbaseInitMsiPath /qn /l*v $CloudbaseInitMsiLog LOGGINGSERIALPORTNAME=$serialPortName"
+    $p = Start-Process -Wait -PassThru -FilePath msiexec -ArgumentList "/i $CloudbaseInitMsiPath /qn /l*v $CloudbaseInitMsiLog LOGGINGSERIALPORTNAME=$serialPortName RUN_SERVICE_AS_LOCAL_SYSTEM=true"
     if ($p.ExitCode -ne 0)
     {
         throw "Installing $CloudbaseInitMsiPath failed. Log: $CloudbaseInitMsiLog"
     }
 
-    $Host.UI.RawUI.WindowTitle = "Running SetSetupComplete..."
-    & "$programFilesDir\Cloudbase Solutions\Cloudbase-Init\bin\SetSetupComplete.cmd"
+    Set-SetupComplete
 
     Run-Defragment
 
