@@ -81,10 +81,15 @@ function Release-IP {
         }
 }
 
-function Install-WindowsUpdates {
-    Import-Module "$resourcesDir\WindowsUpdates\WindowsUpdates"
+function Get-WindowsVersion {
     $BaseOSKernelVersion = [System.Environment]::OSVersion.Version
     $OSKernelVersion = ($BaseOSKernelVersion.Major.ToString() + "." + $BaseOSKernelVersion.Minor.ToString())
+    return $OSKernelVersion
+}
+
+function Install-WindowsUpdates {
+    Import-Module "$resourcesDir\WindowsUpdates\WindowsUpdates"
+    $OSKernelVersion = Get-WindowsVersion
     $KBIdsBlacklist = @{
         "6.1" = @("KB3013538","KB2808679", "KB2894844", "KB3019978", "KB2984976");
         "6.2" = @("KB3013538", "KB3042058", "KB3172729")
@@ -156,14 +161,19 @@ function Disable-Swap {
 function Skip-Rearm {
     #Note: On 2008R2 we need to make sure that the sysprep process will not reset the activation status.
     # We can set the registry key SkipRearm to 1 in order to stop this.
-    Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform\' -Name SkipRearm -Value '1'
+    if (((Get-WindowsVersion) -eq "6.1") -or ((Get-WindowsVersion) -eq "6.0")) {
+         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform\' -Name SkipRearm -Value '1'
+    }
 }
 
 function Activate-Windows {
+    param($productKey)
     #Note: On 2008R2 the initial product key activation fails
     # so we need to manually activate it using slmgr
     slmgr /ipk $productKey
-    slmgr /ato
+    if (((Get-WindowsVersion) -eq "6.1") -or ((Get-WindowsVersion) -eq "6.0")) {
+        slmgr /ato
+    }
 }
 
 try
@@ -177,11 +187,6 @@ try
 
     $p_dirty = Start-Process -NoNewWindow -FilePath "powershell.exe" {Add-Type -AssemblyName System.Windows.Forms;while (1) {[System.Windows.Forms.SendKeys]::SendWait('~');start-sleep 50;}} -PassThru
     $productKey = Get-IniFileValue -Path $configIniPath -Section "DEFAULT" -Key "ProductKey" -Default $null
-
-    if ($productKey) {
-        Activate-Windows
-        Skip-Rearm
-    }
 
     if($installUpdates)
     {
@@ -229,6 +234,12 @@ try
 
     Release-IP
 
+    $cloudbaseinitConfigPath = "$programFilesDir\Cloudbase Solutions\Cloudbase-Init\conf\cloudbase-init.conf"
+    if ($productKey) {
+        Activate-Windows $productKey
+        Skip-Rearm
+        Set-IniFileValue -Path $cloudbaseinitConfigPath -Section "DEFAULT" -Key "activate_windows" -Value "true"
+    }
     $Host.UI.RawUI.WindowTitle = "Running Sysprep..."
     $unattendedXmlPath = "$programFilesDir\Cloudbase Solutions\Cloudbase-Init\conf\Unattend.xml"
     Set-PersistDrivers -Path $unattendedXmlPath -Persist:$persistDrivers
