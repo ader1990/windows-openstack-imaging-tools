@@ -1,10 +1,12 @@
 windows-openstack-imaging-tools
 ===============================
+Windows OpenStack Imaging Tools automates the generation of Windows images.
+The target environments for the Windows images are OpenStack (supporting KVM, Hyper-V, VMware and baremetal), MAAS (supporting KVM, Hyper-V, VMware and baremetal).
+The generation environment needs to be a Windows one, with Hyper-V virtualization enabled.
 
-Tools to automate the creation of a Windows image for OpenStack, supporting KVM, Hyper-V, ESXi, baremetal and more.
+The following versions of Windows images (both x86 / x64, if existent) to be generated are supported:
 
-Supports any version of Windows starting with Windows 2008 R2 and Windows 7, including:
-
+* Windows Server 2008
 * Windows Server 2008 R2
 * Hyper-V Server 2008 R2
 * Windows Server 2012
@@ -12,9 +14,11 @@ Supports any version of Windows starting with Windows 2008 R2 and Windows 7, inc
 * Windows Server 2012 R2
 * Hyper-V Server 2012 R2
 * Windows Server 2016 
+* Hyper-V Server 2016
 * Windows 7
 * Windows 8
 * Windows 8.1
+* Windows 10
 
 Supports both x64 and x86 images.
 
