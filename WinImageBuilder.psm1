@@ -293,7 +293,7 @@ function Convert-VirtualDisk {
     )
     Write-Host "Converting virtual disk image from $vhdPath to $outPath..."
     Execute-Retry {
-        & "$scriptPath\bin\qemu-img.exe" convert -O $format.ToLower() $vhdPath $outPath
+        & "$scriptPath\bin\qemu-img.exe" convert -p -O $format.ToLower() $vhdPath $outPath
         if($LASTEXITCODE) { throw "qemu-img failed to convert the virtual disk" }
     }
 }
@@ -589,7 +589,6 @@ function Compress-Image {
         } finally {
             popd
         }
-
         Remove-Item -Force $VirtualDiskPath
         Write-Host "Compressing $tmpName to gzip"
         pushd ([System.IO.Path]::GetDirectoryName((Resolve-path $tmpName).Path))
@@ -614,6 +613,33 @@ function Compress-Image {
     }
     Move-Item ($tmpName + ".gz") $ImagePath
     Write-Output "MaaS image is ready and available at: $ImagePath"
+}
+
+function Create-ProtectedZip {
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [Alias("7za.exe")]
+        [array]$Command
+    )
+    PROCESS {
+        $cmdType = (Get-Command $Command[0]).CommandType
+        if($cmdType -eq "Application") {
+            $ErrorActionPreference = "SilentlyContinue"
+            $ret = & $Command[0] $Command[1..$Command.Length] 2>&1
+            $ErrorActionPreference = "Stop"
+        } else {
+            $ret = & $Command[0] $Command[1..$Command.Length]
+        }
+
+        if($cmdType -eq "Application" -and $LASTEXITCODE){
+            Throw ("Failed to run: " + ($Command -Join " "))
+        }
+        if($ret -and $ret.Length -gt 0){
+            return $ret
+        }
+        return $false
+    }
 }
 
 function Resize-VHDImage {
@@ -1115,7 +1141,9 @@ function New-WindowsFromGoldenImage {
         [parameter(Mandatory=$false)]
         [switch]$PurgeUpdates,
         [parameter(Mandatory=$false)]
-        [switch]$DisableSwap
+        [switch]$DisableSwap,
+        [parameter(Mandatory=$false)]
+        [string]$zipPassword
     )
     PROCESS
     {
@@ -1193,6 +1221,12 @@ function New-WindowsFromGoldenImage {
                 Write-Output "Converting VHD to QCow2"
                 Convert-VirtualDisk $WindowsImageVHDXPath $Qcow2ImagePath "qcow2"
                 Remove-Item -Force $WindowsImageVHDXPath
+                If ($zipPassword){
+                    $final_path=$barePath + ".zip"
+                    $7zip = Join-Path $localResourcesDir 7za.exe
+                    Write-Host "Creating protected .zip ....."
+                    Create-ProtectedZip -Command @("$7zip", "a" , "-tzip", "$final_path", "$Qcow2ImagePath", "-p$zipPassword", "-mx1")
+                }
             }
         } catch {
             Write-Host $_
