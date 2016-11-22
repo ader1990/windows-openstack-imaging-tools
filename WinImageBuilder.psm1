@@ -615,7 +615,7 @@ function Compress-Image {
     Write-Output "MaaS image is ready and available at: $ImagePath"
 }
 
-function Create-ProtectedZip {
+function Start-CreatingZip {
     [CmdletBinding()]
     Param(
         [Parameter(Mandatory=$true)]
@@ -833,7 +833,9 @@ function New-MaaSImage {
         [parameter(Mandatory=$false)]
         [switch]$DisableSwap,
         [parameter(Mandatory=$false)]
-        [switch]$GoldImage=$false
+        [switch]$GoldImage=$false,
+        [parameter(Mandatory=$false)]
+        [string]$zipPassword
 
     )
     
@@ -845,7 +847,7 @@ function New-MaaSImage {
             -AdministratorPassword $AdministratorPassword -PersistDriverInstall:$PersistDriverInstall `
             -ExtraDriversPath $ExtraDriversPath -Memory $Memory -CpuCores $CpuCores `
             -RunSysprep:$RunSysprep -SwitchName $SwitchName -Force:$Force -PurgeUpdates:$PurgeUpdates `
-            -DisableSwap:$DisableSwap -GoldImage:$GoldImage
+            -DisableSwap:$DisableSwap -GoldImage:$GoldImage -zipPassword $zipPassword
     }
 }
 
@@ -893,7 +895,9 @@ function New-WindowsOnlineImage {
         [parameter(Mandatory=$false)]
         [switch]$DisableSwap,
         [parameter(Mandatory=$false)]
-        [switch]$GoldImage=$false
+        [switch]$GoldImage=$false,
+        [parameter(Mandatory=$false)]
+        [string]$zipPassword
     )
     PROCESS
     {
@@ -947,7 +951,8 @@ function New-WindowsOnlineImage {
                 -VirtIOISOPath $VirtIOISOPath -InstallUpdates:$InstallUpdates `
                 -AdministratorPassword $AdministratorPassword -PersistDriverInstall:$PersistDriverInstall `
                 -InstallMaaSHooks:$InstallMaaSHooks -ExtraFeatures $ExtraFeatures -ExtraDriversPath $ExtraDriversPath `
-                -DiskLayout $DiskLayout -PurgeUpdates:$PurgeUpdates -DisableSwap:$DisableSwap -GoldImage:$GoldImage
+                -DiskLayout $DiskLayout -PurgeUpdates:$PurgeUpdates -DisableSwap:$DisableSwap -GoldImage:$GoldImage `
+                -zipPassword $zipPassword
 
             if ($RunSysprep) {
                 if($DiskLayout -eq "UEFI") {
@@ -1029,7 +1034,9 @@ function New-WindowsCloudImage {
         [parameter(Mandatory=$false)]
         [switch]$DisableSwap,
         [parameter(Mandatory=$false)]
-        [switch]$GoldImage=$false
+        [switch]$GoldImage=$false,
+        [parameter(Mandatory=$false)]
+        [string]$zipPassword
 
     )
 
@@ -1100,6 +1107,14 @@ function New-WindowsCloudImage {
         if ($VHDPath -ne $VirtualDiskPath) {
             Convert-VirtualDisk $VHDPath $VirtualDiskPath $VirtualDiskFormat
             Remove-Item -Force $VHDPath
+        }
+        if ($zipPassword){
+            $barePath = Get-PathWithoutExtension $VirtualDiskPath
+            $zipPath=$barePath + ".zip"
+            $7zip = Join-Path $localResourcesDir 7za.exe
+            Write-Host "Creating protected .zip ....."
+            Start-CreatingZip -Command @("$7zip", "a" , "-tzip", "$zipPath", "$VirtualDiskPath", "-p$zipPassword", "-mx1")
+            Write-Host "The zip password is: $zipPassword"
         }
         Write-Host ("Image generation finished at: {0}" -f @(Get-Date))
     }
@@ -1221,11 +1236,12 @@ function New-WindowsFromGoldenImage {
                 Write-Output "Converting VHD to QCow2"
                 Convert-VirtualDisk $WindowsImageVHDXPath $Qcow2ImagePath "qcow2"
                 Remove-Item -Force $WindowsImageVHDXPath
-                If ($zipPassword){
-                    $final_path=$barePath + ".zip"
+                if ($zipPassword){
+                    $zipPath=$barePath + ".zip"
                     $7zip = Join-Path $localResourcesDir 7za.exe
                     Write-Host "Creating protected .zip ....."
-                    Create-ProtectedZip -Command @("$7zip", "a" , "-tzip", "$final_path", "$Qcow2ImagePath", "-p$zipPassword", "-mx1")
+                    Start-CreatingZip -Command @("$7zip", "a" , "-tzip", "$zipPath", "$Qcow2ImagePath", "-p$zipPassword", "-mx1")
+                    Write-Host "The zip password is: $zipPassword"
                 }
             }
         } catch {

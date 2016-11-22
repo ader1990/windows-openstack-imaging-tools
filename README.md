@@ -45,6 +45,9 @@ Example PowerShell script:
 
     # The product key is optional
     #$productKey = “xxxxx-xxxxx…"
+    
+    # You also have the option to create a password protected zip by using the optional parameter
+    #$zipPassword = "your-password"
 
     # Add -InstallUpdates for the Windows updates (it takes longer and requires
     # more space but it's highly recommended)
