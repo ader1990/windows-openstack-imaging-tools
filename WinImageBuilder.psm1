@@ -1153,6 +1153,16 @@ function New-WindowsFromGoldenImage {
             Copy-UnattendResources -resourcesDir $resourcesDir -imageInstallationType "Server Standard"
             Generate-ConfigFile $resourcesDir $configValues
             Download-CloudbaseInit $resourcesDir ([string]"AMD64")
+			
+			$versionString = (Get-Item "$driveLetterGold\Windows\system32\ntdll.dll").VersionInfo.ProductVersion
+			$OSVersion = $versionString.split('.')
+			$ImageVersion = @{"Major"=$OSVersion[0];"Minor"=$OSVersion[1]}
+			$ImageArchitecture="AMD64"
+			$ImageInstallationType="Server"
+			$image=@{"ImageVersion"=$ImageVersion ; "ImageArchitecture"=$ImageArchitecture ; "ImageInstallationType"=$ImageInstallationType}
+			if($VirtIOISOPath){
+				Add-VirtIODriversFromISO $driveLetterGold $image $VirtIOISOPath
+			}
             
             Dismount-VHD -Path $WindowsImageVHDXPath
 
