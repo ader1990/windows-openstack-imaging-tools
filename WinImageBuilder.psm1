@@ -616,6 +616,47 @@ function Compress-Image {
     Write-Output "MaaS image is ready and available at: $ImagePath"
 }
 
+function Start-Executable {
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [Alias("7za.exe")]
+        [array]$Command
+    )
+    PROCESS {
+        $cmdType = (Get-Command $Command[0]).CommandType
+        if ($cmdType -eq "Application") {
+            $ErrorActionPreference = "SilentlyContinue"
+            $ret = & $Command[0] $Command[1..$Command.Length] 2>&1
+            $ErrorActionPreference = "Stop"
+        } else {
+            $ret = & $Command[0] $Command[1..$Command.Length]
+        }
+        if $cmdType -eq "Application" -and $LASTEXITCODE){
+            Throw ("Failed to run: " + ($Command -Join " "))
+        }
+        if ($ret -and $ret.Length -gt 0){
+            return $ret
+        }
+        return $false
+    }
+}
+
+function New-ProtectedZip {
+    Param(
+        [parameter(Mandatory=$true)]
+        [string]$ZipPassword,
+        [Parameter(Mandatory=$true)]
+        [string]$VirtualDiskPath
+    )
+        $barePath = Get-PathWithoutExtension $VirtualDiskPath
+        $zipPath=$barePath + ".zip"
+        $7zip = Join-Path $localResourcesDir 7za.exe
+        Write-Host "Creating protected .zip ..."
+        Start-Executable -Command @("$7zip", "a" , "-tzip", "$zipPath", "$VirtualDiskPath", "-p$ZipPassword", "-mx1")
+        Write-Host "The zip password is: $ZipPassword"
+}
+
 function Resize-VHDImage {
     Param(
         [Parameter(Mandatory=$true)]
@@ -807,7 +848,9 @@ function New-MaaSImage {
         [parameter(Mandatory=$false)]
         [switch]$DisableSwap,
         [parameter(Mandatory=$false)]
-        [switch]$GoldImage=$false
+        [switch]$GoldImage=$false,
+        [parameter(Mandatory=$false)]
+        [string]$ZipPassword
 
     )
     PROCESS
@@ -818,7 +861,7 @@ function New-MaaSImage {
             -AdministratorPassword $AdministratorPassword -PersistDriverInstall:$PersistDriverInstall `
             -ExtraDriversPath $ExtraDriversPath -Memory $Memory -CpuCores $CpuCores `
             -RunSysprep:$RunSysprep -SwitchName $SwitchName -Force:$Force -PurgeUpdates:$PurgeUpdates `
-            -DisableSwap:$DisableSwap -GoldImage:$GoldImage
+            -DisableSwap:$DisableSwap -GoldImage:$GoldImage -ZipPassword $ZipPassword
     }
 }
 
@@ -866,7 +909,9 @@ function New-WindowsOnlineImage {
         [parameter(Mandatory=$false)]
         [switch]$DisableSwap,
         [parameter(Mandatory=$false)]
-        [switch]$GoldImage=$false
+        [switch]$GoldImage=$false,
+        [parameter(Mandatory=$false)]
+        [string]$ZipPassword
     )
     PROCESS
     {
@@ -920,7 +965,8 @@ function New-WindowsOnlineImage {
                 -VirtIOISOPath $VirtIOISOPath -InstallUpdates:$InstallUpdates `
                 -AdministratorPassword $AdministratorPassword -PersistDriverInstall:$PersistDriverInstall `
                 -InstallMaaSHooks:$InstallMaaSHooks -ExtraFeatures $ExtraFeatures -ExtraDriversPath $ExtraDriversPath `
-                -DiskLayout $DiskLayout -PurgeUpdates:$PurgeUpdates -DisableSwap:$DisableSwap -GoldImage:$GoldImage
+                -DiskLayout $DiskLayout -PurgeUpdates:$PurgeUpdates -DisableSwap:$DisableSwap -GoldImage:$GoldImage `
+                -ZipPassword $ZipPassword
 
             if ($RunSysprep) {
                 if($DiskLayout -eq "UEFI") {
@@ -949,6 +995,9 @@ function New-WindowsOnlineImage {
                 $Qcow2ImagePath = $barePath + ".qcow2"
                 Write-Host "Converting VHD to QCow2"
                 Convert-VirtualDisk $VirtualDiskPath $Qcow2ImagePath "qcow2"
+                if ($ZipPassword) {
+                    New-ProtectedZip -ZipPassword $ZipPassword -VirtualDiskPath $Qcow2ImagePath
+                }
                 Remove-Item -Force $VirtualDiskPath
             }
         } catch {
@@ -1002,7 +1051,9 @@ function New-WindowsCloudImage {
         [parameter(Mandatory=$false)]
         [switch]$DisableSwap,
         [parameter(Mandatory=$false)]
-        [switch]$GoldImage=$false
+        [switch]$GoldImage=$false,
+        [parameter(Mandatory=$false)]
+        [string]$ZipPassword
 
     )
 
@@ -1080,6 +1131,9 @@ function New-WindowsCloudImage {
 
         if ($VHDPath -ne $VirtualDiskPath) {
             Convert-VirtualDisk $VHDPath $VirtualDiskPath $VirtualDiskFormat
+            if ($ZipPassword) {
+                New-ProtectedZip -ZipPassword $ZipPassword -VirtualDiskPath $VirtualDiskPath
+            }
             Remove-Item -Force $VHDPath
         }
         Write-Host ("Image generation finished at: {0}" -f @(Get-Date))
@@ -1122,7 +1176,9 @@ function New-WindowsFromGoldenImage {
         [parameter(Mandatory=$false)]
         [switch]$PurgeUpdates,
         [parameter(Mandatory=$false)]
-        [switch]$DisableSwap
+        [switch]$DisableSwap,
+        [parameter(Mandatory=$false)]
+        [string]$ZipPassword
     )
     PROCESS
     {
@@ -1198,6 +1254,9 @@ function New-WindowsFromGoldenImage {
                 $Qcow2ImagePath = $barePath + ".qcow2"
                 Write-Output "Converting VHD to QCow2"
                 Convert-VirtualDisk $WindowsImageVHDXPath $Qcow2ImagePath "qcow2"
+                if ($ZipPassword) {
+                    New-ProtectedZip -ZipPassword $ZipPassword -VirtualDiskPath $Qcow2ImagePath
+                }
                 Remove-Item -Force $WindowsImageVHDXPath
             }
         } catch {
