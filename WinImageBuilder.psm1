@@ -625,17 +625,17 @@ function Start-Executable {
     )
     PROCESS {
         $cmdType = (Get-Command $Command[0]).CommandType
-        if($cmdType -eq "Application") {
+        if ($cmdType -eq "Application") {
             $ErrorActionPreference = "SilentlyContinue"
             $ret = & $Command[0] $Command[1..$Command.Length] 2>&1
             $ErrorActionPreference = "Stop"
         } else {
             $ret = & $Command[0] $Command[1..$Command.Length]
         }
-        if($cmdType -eq "Application" -and $LASTEXITCODE){
+        if $cmdType -eq "Application" -and $LASTEXITCODE){
             Throw ("Failed to run: " + ($Command -Join " "))
         }
-        if($ret -and $ret.Length -gt 0){
+        if ($ret -and $ret.Length -gt 0){
             return $ret
         }
         return $false
@@ -649,14 +649,12 @@ function New-ProtectedZip {
         [Parameter(Mandatory=$true)]
         [string]$VirtualDiskPath
     )
-    if ($ZipPassword) {
         $barePath = Get-PathWithoutExtension $VirtualDiskPath
         $zipPath=$barePath + ".zip"
         $7zip = Join-Path $localResourcesDir 7za.exe
         Write-Host "Creating protected .zip ..."
         Start-Executable -Command @("$7zip", "a" , "-tzip", "$zipPath", "$VirtualDiskPath", "-p$ZipPassword", "-mx1")
         Write-Host "The zip password is: $ZipPassword"
-    }
 }
 
 function Resize-VHDImage {
@@ -997,7 +995,9 @@ function New-WindowsOnlineImage {
                 $Qcow2ImagePath = $barePath + ".qcow2"
                 Write-Host "Converting VHD to QCow2"
                 Convert-VirtualDisk $VirtualDiskPath $Qcow2ImagePath "qcow2"
-                New-ProtectedZip -ZipPassword $ZipPassword -VirtualDiskPath $Qcow2ImagePath
+                if ($ZipPassword) {
+                    New-ProtectedZip -ZipPassword $ZipPassword -VirtualDiskPath $Qcow2ImagePath
+                }
                 Remove-Item -Force $VirtualDiskPath
             }
         } catch {
@@ -1131,7 +1131,9 @@ function New-WindowsCloudImage {
 
         if ($VHDPath -ne $VirtualDiskPath) {
             Convert-VirtualDisk $VHDPath $VirtualDiskPath $VirtualDiskFormat
-            New-ProtectedZip -ZipPassword $ZipPassword -VirtualDiskPath $VirtualDiskPath
+            if ($ZipPassword) {
+                New-ProtectedZip -ZipPassword $ZipPassword -VirtualDiskPath $VirtualDiskPath
+            }
             Remove-Item -Force $VHDPath
         }
         Write-Host ("Image generation finished at: {0}" -f @(Get-Date))
@@ -1252,7 +1254,9 @@ function New-WindowsFromGoldenImage {
                 $Qcow2ImagePath = $barePath + ".qcow2"
                 Write-Output "Converting VHD to QCow2"
                 Convert-VirtualDisk $WindowsImageVHDXPath $Qcow2ImagePath "qcow2"
-                New-ProtectedZip -ZipPassword $ZipPassword -VirtualDiskPath $Qcow2ImagePath
+                if ($ZipPassword) {
+                    New-ProtectedZip -ZipPassword $ZipPassword -VirtualDiskPath $Qcow2ImagePath
+                }
                 Remove-Item -Force $WindowsImageVHDXPath
             }
         } catch {
