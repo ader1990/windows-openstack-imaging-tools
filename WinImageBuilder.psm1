@@ -163,15 +163,36 @@ function Apply-Image {
         [parameter(Mandatory=$true)]
         [string]$wimFilePath,
         [parameter(Mandatory=$true)]
-        [int]$imageIndex
+        [int]$imageIndex,
+		[Parameter(Mandatory=$true)]
+		[object]$image
     )
     Write-Output ('Applying Windows image "{0}" in "{1}"' -f $wimFilePath, $winImagePath)
     #Expand-WindowsImage -ImagePath $wimFilePath -Index $imageIndex -ApplyPath $winImagePath
     # Use Dism in place of the PowerShell equivalent for better progress update
     # and for ease of interruption with CTRL+C
-    & Dism.exe /apply-image /imagefile:${wimFilePath} /index:${imageIndex} /ApplyDir:${winImagePath}
+    $dism_path = Get-DismPath $wimFilePath $image 
+    & $dism_path /apply-image /imagefile:${wimFilePath} /index:${imageIndex} /ApplyDir:${winImagePath}
     if ($LASTEXITCODE) { throw "Dism apply-image failed" }
 }
+
+function Get-DismPath {
+    Param (
+    [parameter(Mandatory=$true)]
+    [string]$wimFilePath,
+    [Parameter(Mandatory=$true)]
+    [object]$image
+    )
+
+    $default_dism= "$env:windir\system32\Dism.exe"
+    $a = [System.IO.Path]::GetPathRoot($WimFilePath)
+    $source_dism= join-path $a "sources\dism.exe"
+    if ((Check-DismVersionForImage $image) -eq $false) {
+        $default_dism=$source_dism
+    }
+    return $default_dism
+}
+
 
 function Create-BCDBootConfig {
     Param(
@@ -293,6 +314,7 @@ function Check-DismVersionForImage {
         (Get-Command dism.exe).FileVersionInfo.ProductVersion
     if ($image.ImageVersion.CompareTo($dismVersion) -gt 0) {
         Write-Warning "The installed version of DISM is older than the Windows image"
+        return $false
     }
 }
 
@@ -389,10 +411,15 @@ function Add-DriversToImage {
         [Parameter(Mandatory=$true)]
         [string]$winImagePath,
         [Parameter(Mandatory=$true)]
-        [string]$driversPath
+        [string]$driversPath,
+		[parameter(Mandatory=$true)]
+        [string]$wimFilePath,
+		[Parameter(Mandatory=$true)]
+		[object]$image
     )
     Write-Output ('Adding drivers from "{0}" to image "{1}"' -f $driversPath, $winImagePath)
-    & Dism.exe /image:${winImagePath} /Add-Driver /driver:${driversPath} /ForceUnsigned /recurse
+    $dism_path = Get-DismPath $wimFilePath $image
+    & $dism_path /image:${winImagePath} /Add-Driver /driver:${driversPath} /ForceUnsigned /recurse
     if ($LASTEXITCODE) {
         throw "Dism failed to add drivers from: $driversPath"
     }
@@ -520,7 +547,7 @@ function Add-VirtIODrivers {
     }
     $virtioDir = "{0}\{1}\{2}" -f $driversBasePath, $virtioVer, $image.ImageArchitecture
     if (Test-Path $virtioDir) {
-        Add-DriversToImage $vhdDriveLetter $virtioDir
+        Add-DriversToImage $vhdDriveLetter $virtioDir $wimFilePath $image
         return
     }
 
@@ -531,7 +558,7 @@ function Add-VirtIODrivers {
         -Architecture $image.ImageArchitecture
     foreach ($virtioDriversPath in $virtioDriversPaths) {
         if (Test-Path $virtioDriversPath) {
-            Add-DriversToImage $vhdDriveLetter $virtioDriversPath
+            Add-DriversToImage $vhdDriveLetter $virtioDriversPath $wimFilePath $image
         }
     }
 }
@@ -1162,12 +1189,12 @@ function New-WindowsCloudImage {
             Copy-UnattendResources $resourcesDir $image.ImageInstallationType $InstallMaaSHooks
             Generate-ConfigFile $resourcesDir $configValues
             Download-CloudbaseInit $resourcesDir ([string]$image.ImageArchitecture)
-            Apply-Image $winImagePath $wimFilePath $image.ImageIndex
+            Apply-Image $winImagePath $wimFilePath $image.ImageIndex $image
             Create-BCDBootConfig $drives[0] $drives[1] $DiskLayout $image
             Check-EnablePowerShellInImage $winImagePath $image
 
             if ($ExtraDriversPath -and (Test-Path $ExtraDriversPath)) {
-                Add-DriversToImage $winImagePath $ExtraDriversPath
+                Add-DriversToImage $winImagePath $ExtraDriversPath $wimFilePath $image
             }
             if ($VirtIOISOPath) {
                 Add-VirtIODriversFromISO $winImagePath $image $VirtIOISOPath
