@@ -351,14 +351,25 @@ function Download-CloudbaseInit {
         [Parameter(Mandatory=$true)]
         [string]$resourcesDir,
         [Parameter(Mandatory=$true)]
-        [string]$osArch
+        [string]$osArch,
+        [parameter(Mandatory=$false)]
+        [switch]$betaRelease=$true
+
     )
     Write-Host "Downloading Cloudbase-Init..."
 
-    if ($osArch -eq "AMD64") {
-        $CloudbaseInitMsi = "CloudbaseInitSetup_Stable_x64.msi"
+    if ($betaRelease){
+        if ($osArch -eq "AMD64") {
+            $CloudbaseInitMsi = "CloudbaseInitSetup_x64.msi"
+        } else {
+            $CloudbaseInitMsi = "CloudbaseInitSetup_x86.msi"
+        }
     } else {
-        $CloudbaseInitMsi = "CloudbaseInitSetup_Stable_x86.msi"
+        if ($osArch -eq "AMD64") {
+            $CloudbaseInitMsi = "CloudbaseInitSetup_Stable_x64.msi"
+        } else {
+            $CloudbaseInitMsi = "CloudbaseInitSetup_Stable_x86.msi"
+        }
     }
 
     $CloudbaseInitMsiPath = "$resourcesDir\CloudbaseInit.msi"
@@ -905,7 +916,9 @@ function New-MaaSImage {
         [parameter(Mandatory=$false)]
         [switch]$GoldImage=$false,
         [parameter(Mandatory=$false)]
-        [string]$ZipPassword
+        [string]$ZipPassword,
+        [parameter(Mandatory=$false)]
+        [switch]$cloudbaseInitDevel=$true
 
     )
     PROCESS
@@ -916,7 +929,8 @@ function New-MaaSImage {
             -AdministratorPassword $AdministratorPassword -PersistDriverInstall:$PersistDriverInstall `
             -ExtraDriversPath $ExtraDriversPath -Memory $Memory -CpuCores $CpuCores `
             -RunSysprep:$RunSysprep -SwitchName $SwitchName -Force:$Force -PurgeUpdates:$PurgeUpdates `
-            -DisableSwap:$DisableSwap -GoldImage:$GoldImage -ZipPassword $ZipPassword
+            -DisableSwap:$DisableSwap -GoldImage:$GoldImage -ZipPassword $ZipPassword `
+            -cloudbaseInitDevel:$cloudbaseInitDevel
     }
 }
 
@@ -966,7 +980,9 @@ function New-WindowsOnlineImage {
         [parameter(Mandatory=$false)]
         [switch]$GoldImage=$false,
         [parameter(Mandatory=$false)]
-        [string]$ZipPassword
+        [string]$ZipPassword,
+        [parameter(Mandatory=$false)]
+        [switch]$cloudbaseInitDevel=$true
     )
     PROCESS
     {
@@ -1021,7 +1037,7 @@ function New-WindowsOnlineImage {
                 -AdministratorPassword $AdministratorPassword -PersistDriverInstall:$PersistDriverInstall `
                 -InstallMaaSHooks:$InstallMaaSHooks -ExtraFeatures $ExtraFeatures -ExtraDriversPath $ExtraDriversPath `
                 -DiskLayout $DiskLayout -PurgeUpdates:$PurgeUpdates -DisableSwap:$DisableSwap -GoldImage:$GoldImage `
-                -ZipPassword $ZipPassword
+                -ZipPassword $ZipPassword -cloudbaseInitDevel:$cloudbaseInitDevel
 
             if ($RunSysprep) {
                 if($DiskLayout -eq "UEFI") {
@@ -1108,7 +1124,9 @@ function New-WindowsCloudImage {
         [parameter(Mandatory=$false)]
         [switch]$GoldImage=$false,
         [parameter(Mandatory=$false)]
-        [string]$ZipPassword
+        [string]$ZipPassword,
+        [parameter(Mandatory=$false)]
+        [switch]$cloudbaseInitDevel=$true
 
     )
 
@@ -1161,7 +1179,7 @@ function New-WindowsCloudImage {
             Generate-UnattendXml @xmlParams
             Copy-UnattendResources $resourcesDir $image.ImageInstallationType $InstallMaaSHooks
             Generate-ConfigFile $resourcesDir $configValues
-            Download-CloudbaseInit $resourcesDir ([string]$image.ImageArchitecture)
+            Download-CloudbaseInit $resourcesDir ([string]$image.ImageArchitecture) -betaRelease:$cloudbaseInitDevel
             Apply-Image $winImagePath $wimFilePath $image.ImageIndex
             Create-BCDBootConfig $drives[0] $drives[1] $DiskLayout $image
             Check-EnablePowerShellInImage $winImagePath $image
@@ -1235,7 +1253,9 @@ function New-WindowsFromGoldenImage {
         [parameter(Mandatory=$false)]
         [switch]$GoldImage=$false,
         [parameter(Mandatory=$false)]
-        [string]$ZipPassword
+        [string]$ZipPassword,
+        [parameter(Mandatory=$false)]
+        [switch]$cloudbaseInitDevel=$true
     )
     PROCESS
     {
@@ -1270,7 +1290,7 @@ function New-WindowsFromGoldenImage {
             $resourcesDir = Join-Path -Path $driveLetterGold -ChildPath "UnattendResources"
             Copy-UnattendResources -resourcesDir $resourcesDir -imageInstallationType "Server Standard"
             Generate-ConfigFile $resourcesDir $configValues
-            Download-CloudbaseInit $resourcesDir ([string]"AMD64")
+            Download-CloudbaseInit $resourcesDir ([string]"AMD64") -betaRelease:$cloudbaseInitDevel
 
             $imageInfo = Get-ImageInformation $driveLetterGold
             if ($VirtIOISOPath) {
