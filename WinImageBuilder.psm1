@@ -1387,7 +1387,7 @@ function New-WindowsCloudImage {
             }
         } finally {
             if (Test-Path $VHDPath) {
-                Detach-VirtualDisk $VHDPath
+                Dismount-Vhd $VHDPath -Confirm:$false
             }
         }
 
