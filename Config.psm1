@@ -16,7 +16,35 @@ Set-StrictMode -Version 2
 
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $localResourcesDir = "$scriptPath\UnattendResources"
-Import-Module "$localResourcesDir\ini.psm1"
+$PLATFORM = ([System.Environment]::OSVersion).Platform
+$PLATFORM_UNIX = 'Unix'
+
+# Small wrapper for Linux PowerShell until crudini gets supported on Windows
+if ($PLATFORM -eq $PLATFORM_UNIX) {
+    if (!(Get-Command 'crudini')) {
+        throw "Please install 'crudini' package."
+    }
+    function Set-IniFileValue {
+        param($Path,
+              $Key,
+              $Value,
+              $Section="DEFAULT")
+        crudini --set $Path $Section $Key $Value | Out-Null
+    }
+    function Get-IniFileValue {
+        param($Path,
+              $Key,
+              $Section="DEFAULT",
+              [switch]$AsBoolean)
+        $value =  $(crudini --get $Path $Section $Key)
+        if ($AsBoolean -and $value -eq "False") {
+            $value = $false
+        }
+        return $value
+    }
+} else {
+    Import-Module "$localResourcesDir\ini.psm1"
+}
 
 function Get-AvailableConfigOptions {
     return @(

@@ -12,12 +12,23 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 $ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2
-Import-Module Dism
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $localResourcesDir = "$scriptPath\UnattendResources"
+
+$PLATFORM = ([System.Environment]::OSVersion).Platform
+$PLATFORM_WINDOWS = 'Win32NT'
+$PLATFORM_UNIX = 'Unix'
+
+if ($PLATFORM -eq $PLATFORM_WINDOWS) {
+    Import-Module Dism
+    Import-Module "$scriptPath\UnattendResources\ini.psm1"
+    . "$scriptPath\Interop.ps1"
+} elseif ($PLATFORM -eq $PLATFORM_UNIX) {
+} else {
+    throw "Platform {$PLATFORM} not supported"
+}
+
 Import-Module "$scriptPath\Config.psm1"
-Import-Module "$scriptPath\UnattendResources\ini.psm1"
 
 # Enforce Tls1.2, as GitHub and more websites require it.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -50,8 +61,6 @@ $VirtIODriverMappings = @{
 }
 
 $AvailableCompressionFormats = @("tar","gz","zip")
-
-. "$scriptPath\Interop.ps1"
 
 class PathShouldExistAttribute : System.Management.Automation.ValidateArgumentsAttribute {
     [void] Validate([object]$arguments, [System.Management.Automation.EngineIntrinsics]$engineIntrinsics) {
@@ -98,7 +107,10 @@ function Execute-Retry {
     }
 }
 
-function Is-Administrator {
+function Is-Administrator_Unix{
+}
+
+function Is-Administrator_Win32NT {
     $wid = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $prp = New-Object System.Security.Principal.WindowsPrincipal($wid)
     $adm = [System.Security.Principal.WindowsBuiltInRole]::Administrator
@@ -117,6 +129,15 @@ function Get-WimInteropObject {
 }
 
 function Get-WimFileImagesInfo {
+    Param(
+        [parameter(Mandatory=$true)]
+        [string]$WimFilePath
+    )
+
+    return $(& "Get-WimFileImagesInfo_$PLATFORM" $WimFilePath)
+}
+
+function Get-WimFileImagesInfo_Win32NT {
     <#
     .SYNOPSIS
      This function retrieves a list of the Windows Editions from an ISO file.
@@ -138,8 +159,43 @@ function Get-WimFileImagesInfo {
         return $w.Images
     }
 }
+function Get-WimFileImagesInfo_Unix {
+    <#
+    .SYNOPSIS
+     This function retrieves a list of the Windows Editions from an ISO file.
+    .DESCRIPTION
+     This function reads the Images content of the WIM file that can be found
+     on a mounted ISO and it returns an object for each Windows Edition, each
+     object containing a list of properties.
+    .PARAMETER WimFilePath
+     Location of the install.wim file found on the mounted ISO image.
+    #>
+    Param(
+        [parameter(Mandatory=$true)]
+        [string]$WimFilePath
+    )
+    $wimInfoData = $(wiminfo $WimFilePath --xml)
 
-function Create-ImageVirtualDisk {
+    $regex = '[^\p{L}\p{Nd}>< ="/]+'
+    $wimInfoData = $wimInfoData -replace $regex, ""
+    $wimObjects = New-Object -TypeName System.Xml.XmlDocument
+    $wimObjects.loadXml($wimInfoData)
+    $wimObjects = $wimObjects.wim.image | Select-Object -First 1
+    $image = @(@{
+            "ImageIndex" = 1;
+            "ImageName" = $wimObjects.Name;
+            "ImageArchitecture" = "amd64";
+            "Architecture" = $wimObjects.Architecture;
+            "ImageInstallationType" = "Client";
+            "ImageVersion" = @{
+                "Major" = "10";
+                "Minor" = "0";
+            };
+        })
+    return $image
+}
+
+function Create-ImageVirtualDisk_Win32NT {
     [CmdletBinding()]
     Param(
         [parameter(Mandatory=$true)]
@@ -195,14 +251,50 @@ function Create-ImageVirtualDisk {
     }
 }
 
-function Apply-Image {
+function Create-ImageVirtualDisk_Unix {
+    [CmdletBinding()]
+    Param(
+        [parameter(Mandatory=$true)]
+        [string]$VhdPath,
+        [parameter(Mandatory=$true)]
+        [long]$Size,
+        [parameter(Mandatory=$true)]
+        [string]$DiskLayout
+    )
+    $loopNumber = 0
+    $loopRootDir = "/dev/loop"
+    $loopDir = ""
+    while($true) {
+        $loopDir = "${loopRootDir}${loopNumber}"
+        if (!(Test-Path $loopDir)) {
+            break
+        }
+        $loopNumber += 1
+    }
+    Write-Log "Found free loop device: ${loopDir}"
+    $TEMPLATE_PATH = "/mnt/share/test-win-image-no-bcd-min-20gb.vhdx"
+
+    qemu-img convert -O raw $TEMPLATE_PATH $VhdPath | Out-Null
+    if ($LASTEXITCODE) { throw "Failed to convert template to raw"}
+
+    losetup $loopDir -P $VhdPath | Out-Null
+    if ($LASTEXITCODE) { throw "Failed to mount disk to a loop device"}
+
+    $mountPoint = "/mnt/{0}" -f @(Get-Random)
+    New-Item -Force -Type Directory -Path $mountPoint | Out-Null
+
+    return @($loopDir, $mountPoint)
+}
+
+function Apply-Image_Win32NT {
     Param(
         [parameter(Mandatory=$true)]
         [string]$winImagePath,
         [parameter(Mandatory=$true)]
         [string]$wimFilePath,
         [parameter(Mandatory=$true)]
-        [int]$imageIndex
+        [int]$imageIndex,
+        [string]$mountPoint
     )
     Write-Log ('Applying Windows image "{0}" in "{1}"' -f $wimFilePath, $winImagePath)
     #Expand-WindowsImage -ImagePath $wimFilePath -Index $imageIndex -ApplyPath $winImagePath
@@ -212,7 +304,27 @@ function Apply-Image {
     if ($LASTEXITCODE) { throw "Dism apply-image failed" }
 }
 
-function Create-BCDBootConfig {
+function Apply-Image_Unix {
+    Param(
+        [parameter(Mandatory=$true)]
+        [string]$winImagePath,
+        [parameter(Mandatory=$true)]
+        [string]$wimFilePath,
+        [parameter(Mandatory=$true)]
+        [int]$imageIndex,
+        [string]$mountPoint
+    )
+    wimapply --include-invalid-names --rpfix --strict-acls `
+       $wimFilePath $imageIndex "${winImagePath}p1" | Out-Null
+    if ($LASTEXITCODE) { throw "wimapply failed" }
+    kpartx -a $winImagePath | Out-Null
+    if ($LASTEXITCODE) { throw "Failed to run kpartx add"}
+    $loopNumber = $winImagePath.replace("/dev/","")
+    mount "/dev/mapper/${loopNumber}p1" $mountPoint | Out-Null
+    if ($LASTEXITCODE) { throw "Failed to mount partition"}
+}
+
+function Create-BCDBootConfig_Win32NT {
     Param(
         [parameter(Mandatory=$true)]
         [string]$systemDrive,
@@ -263,6 +375,24 @@ function Create-BCDBootConfig {
         if ($LASTEXITCODE) { Write-Warning "BCDEdit failed: default osdevice locate" }
     }
     Write-Log "BCDBoot config has been created."
+}
+
+function Create-BCDBootConfig_Unix {
+    Param(
+        [parameter(Mandatory=$true)]
+        [string]$systemDrive,
+        [parameter(Mandatory=$true)]
+        [string]$windowsDrive,
+        [parameter(Mandatory=$true)]
+        [string]$diskLayout,
+        [parameter(Mandatory=$true)]
+        [object]$image
+    )
+
+    Copy-Item -Recurse -Force "/mnt/iso/boot" "${windowsDrive}/Boot"
+    Copy-Item -Force "/mnt/share/BCD" "${windowsDrive}/Boot/bcd"
+    hivexsh -w "${windowsDrive}/Boot/bcd" -f "${HOME}/generic_boot" | Out-Null
+    if ($LASTEXITCODE) { throw "hivexsh failed to apply bcd hacks to ${windowsDrive}/Boot/bcd" }
 }
 
 function Transform-Xml {
@@ -318,12 +448,12 @@ function Generate-UnattendXml {
         $xsltArgs["productKey"] = $productKey
     }
 
-    Transform-Xml -xsltPath "$scriptPath\Unattend.xslt" -inXmlPath $inUnattendXmlPath `
+    Transform-Xml -xsltPath "$scriptPath/Unattend.xslt" -inXmlPath $inUnattendXmlPath `
         -outXmlPath $outUnattendXmlPath -xsltArgs $xsltArgs
     Write-Log "Xml was generated."
 }
 
-function Detach-VirtualDisk {
+function Detach-VirtualDisk_Win32NT {
     Param(
         [Parameter(Mandatory=$true)]
         [string]$VhdPath
@@ -336,7 +466,24 @@ function Detach-VirtualDisk {
     }
 }
 
-function Check-DismVersionForImage {
+function Detach-VirtualDisk_Unix {
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$VhdPath,
+        [string]$mountPoint,
+        [string]$loopDevice
+    )
+    umount $mountPoint
+    #if ($LASTEXITCODE) { throw "Could not unmount ${mountPoint}" }
+
+    kpartx -d $loopDevice
+    #if ($LASTEXITCODE) { throw "Could not remove kpartx device ${loopDevice}" }
+
+    losetup -d $loopDevice
+    #if ($LASTEXITCODE) { throw "Could not remove loop device ${loopDevice}" }
+}
+
+function Check-DismVersionForImage_Win32NT {
     Param(
         [Parameter(Mandatory=$true)]
         [object]$image
@@ -347,8 +494,14 @@ function Check-DismVersionForImage {
         Write-Warning "The installed version of DISM is older than the Windows image"
     }
 }
+function Check-DismVersionForImage_Unix{
+    Param(
+        [Parameter(Mandatory=$true)]
+        [object]$image
+    )
+}
 
-function Convert-VirtualDisk {
+function Convert-VirtualDisk_Win32NT {
     Param(
         [Parameter(Mandatory=$true)]
         [string]$vhdPath,
@@ -372,6 +525,19 @@ function Convert-VirtualDisk {
         if($LASTEXITCODE) { throw "qemu-img failed to convert the virtual disk" }
     }
     Write-Log "Finish to convert virtual disk."
+}
+
+function Convert-VirtualDisk_Unix {
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$vhdPath,
+        [Parameter(Mandatory=$true)]
+        [string]$outPath,
+        [Parameter(Mandatory=$true)]
+        [string]$format,
+        [Parameter(Mandatory=$false)]
+        [boolean]$CompressQcow2
+    )
 }
 
 function Copy-CustomResources {
@@ -594,7 +760,7 @@ function Add-PackageToImage {
     }
 }
 
-function Enable-FeaturesInImage {
+function Enable-FeaturesInImage_Win32NT {
     Param(
         [Parameter(Mandatory=$true)]
         [string]$winImagePath,
@@ -616,6 +782,15 @@ function Enable-FeaturesInImage {
             if ($LASTEXITCODE) { throw "Dism failed to enable features: $featureNames" }
         }
     }
+}
+
+function Enable-FeaturesInImage_Unix {
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$winImagePath,
+        [Parameter(Mandatory=$true)]
+        [array]$featureNames
+    )
 }
 
 function Add-CapabilitiesToImage {
@@ -642,7 +817,7 @@ function Add-CapabilitiesToImage {
     }
 }
 
-function Check-EnablePowerShellInImage {
+function Check-EnablePowerShellInImage_Win32NT {
     Param(
         [Parameter(Mandatory=$true)]
         [string]$winImagePath,
@@ -661,6 +836,14 @@ function Check-EnablePowerShellInImage {
                         )
         Enable-FeaturesInImage $winImagePath $psFeatures
     }
+}
+function Check-EnablePowerShellInImage_Unix {
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$winImagePath,
+        [Parameter(Mandatory=$true)]
+        [object]$image
+    )
 }
 
 function Is-IsoFile {
@@ -833,7 +1016,7 @@ function Get-PathWithoutExtension {
                      ([System.IO.Path]::GetFileNameWithoutExtension($Path))
 }
 
-function Compress-Image {
+function Compress-Image_Win32NT {
     Param(
         [Parameter(Mandatory=$true)]
         [string]$VirtualDiskPath,
@@ -920,6 +1103,19 @@ function Compress-Image {
     if (Test-Path $ImagePath) {
         throw "File $ImagePath already exists. The image has been created at $tmpName."
     }
+}
+
+function Compress-Image_Unix {
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$VirtualDiskPath,
+        [Parameter(Mandatory=$true)]
+        [string]$ImagePath,
+        [Parameter(Mandatory=$true)]
+        [string[]]$compressionFormats,
+        [parameter(Mandatory=$false)]
+        [string]$ZipPassword
+    )
 }
 
 function Start-Executable {
@@ -1294,6 +1490,156 @@ function Get-TotalLogicalProcessors {
     return $count
 }
 
+function New-WindowsCloudImage {
+    <#
+    .SYNOPSIS
+     This function creates a Windows Image, starting from an ISO file, without the need
+     of a hypervisor to be enabled. The image, to become ready for cloud usage, needs to be
+     started on a hypervisor and it will automatically shut down when it finishes all the
+     operations needed to become cloud ready: cloudbase-init installation, updates and sysprep.
+    .DESCRIPTION
+     This script can generate a Windows Image in one of the following formats: VHD,
+     VHDX, QCow2, VMDK or RAW. It takes the Windows flavor indicated by the ImageName
+     from the WIM file and based on the parameters given, it will generate an image.
+     This function does not require a hypervisor to be enabled, but the generated image
+     is not ready to be deployed, as it needs to be started manually on another hypervisor.
+     The image is ready to be used when it shuts down.
+
+     The list of parameters can be found in the Config.psm1 file.
+    #>
+    param
+    (
+        [parameter(Mandatory=$true, ValueFromPipeline=$true)]
+        [string]$ConfigFilePath
+    )
+    Write-Log "Cloud image generation started."
+    try {
+    $windowsImageConfig = Get-WindowsImageConfig -ConfigFilePath $ConfigFilePath
+    $mountedWindowsIso = $null
+    if ($windowsImageConfig.wim_file_path.EndsWith('.iso')) {
+        $windowsImageConfig.wim_file_path = get-command $windowsImageConfig.wim_file_path -erroraction ignore | Select-Object -ExpandProperty Source
+        if($windowsImageConfig.wim_file_path -eq $null){
+            throw ("Unable to find source iso. Either specify the full path or add the folder containing the iso to the path variable")
+        }
+        
+        $mountedWindowsIso = [WIMInterop.VirtualDisk]::OpenVirtualDisk($windowsImageConfig.wim_file_path)
+        $mountedWindowsIso.AttachVirtualDisk()
+        $devicePath = $mountedWindowsIso.GetVirtualDiskPhysicalPath()
+        $basePath = ((Get-DiskImage -DevicePath $devicePath `
+                | Get-Volume).DriveLetter) + ":"
+        $windowsImageConfig.wim_file_path = "$($basePath)\Sources\install.wim"
+    }
+    
+    Validate-WindowsImageConfig $windowsImageConfig
+    Set-DotNetCWD
+    & "Is-Administrator_$PLATFORM"
+    $image = Get-WimFileImagesInfo -WimFilePath $windowsImageConfig.wim_file_path | `
+        Where-Object { $_.ImageName -eq $windowsImageConfig.image_name }
+    if (!$image) {
+        throw ("Image {0} not found in WIM file {1}" -f @($windowsImageConfig.image_name, $windowsImageConfig.wim_file_path))
+    }
+    & "Check-DismVersionForImage_$PLATFORM" $image
+
+    if (Test-Path $windowsImageConfig.image_path) {
+        Write-Log "Found already existing image file. Removing it..." -ForegroundColor Yellow
+        Remove-Item -Force $windowsImageConfig.image_path
+        Write-Log "Already existent image file has been removed." -ForegroundColor Yellow
+    }
+
+    $vhdPath = "{0}.raw" -f (Get-PathWithoutExtension $windowsImageConfig.image_path)
+    if (Test-Path $vhdPath) {
+        Remove-Item -Force $vhdPath
+    }
+
+    try {
+        $drives = & "Create-ImageVirtualDisk_$PLATFORM" -VhdPath $vhdPath -Size $windowsImageConfig.disk_size `
+            -DiskLayout $windowsImageConfig.disk_layout
+        $winImagePath = "$($drives[1])/"
+        & "Apply-Image_$PLATFORM" -winImagePath $drives[0] -wimFilePath $windowsImageConfig.wim_file_path `
+            -imageIndex $image.ImageIndex -mountPoint $drives[1]
+        & "Create-BCDBootConfig_$PLATFORM" -systemDrive $drives[0] -windowsDrive $drives[1] -diskLayout $windowsImageConfig.disk_layout `
+            -image $image
+        $resourcesDir = "${winImagePath}UnattendResources"
+        $outUnattendXmlPath = "${winImagePath}Unattend.xml"
+        $xmlunattendPath = Join-Path $scriptPath $windowsImageConfig['unattend_xml_path']
+        $xmlParams = @{'InUnattendXmlPath' = $xmlunattendPath;
+                       'OutUnattendXmlPath' = $outUnattendXmlPath;
+                       'Image' = $image;
+                       'AdministratorPassword' = $windowsImageConfig.administrator_password;
+        }
+        if ($windowsImageConfig.product_key) {
+            $xmlParams.Add('productKey', $windowsImageConfig.product_key);
+        }
+        Generate-UnattendXml @xmlParams
+        Copy-UnattendResources -resourcesDir $resourcesDir -imageInstallationType $image.ImageInstallationType `
+            -InstallMaaSHooks ([bool]$windowsImageConfig.install_maas_hooks) `
+            -VMwareToolsPath $windowsImageConfig.vmware_tools_path
+        Copy-CustomResources -ResourcesDir $resourcesDir -CustomResources $windowsImageConfig.custom_resources_path `
+                             -CustomScripts $windowsImageConfig.custom_scripts_path
+        Copy-Item $ConfigFilePath "$resourcesDir/config.ini"
+        if ($windowsImageConfig.enable_custom_wallpaper) {
+            Set-WindowsWallpaper -WinDrive $winImagePath -WallpaperPath $windowsImageConfig.wallpaper_path `
+                -WallpaperSolidColor $windowsImageConfig.wallpaper_solid_color
+        }
+        if ($windowsImageConfig.zero_unused_volume_sectors) {
+            Download-ZapFree $resourcesDir ([string]$image.ImageArchitecture)
+        }
+        Download-CloudbaseInit -resourcesDir $resourcesDir -osArch ([string]$image.ImageArchitecture) `
+                               -BetaRelease:$windowsImageConfig.beta_release -MsiPath $windowsImageConfig.msi_path `
+                               -CloudbaseInitConfigPath $windowsImageConfig.cloudbase_init_config_path `
+                               -CloudbaseInitUnattendedConfigPath $windowsImageConfig.cloudbase_init_unattended_config_path
+        & "Check-EnablePowerShellInImage_$PLATFORM" $winImagePath $image
+
+        if ($windowsImageConfig.drivers_path -and (Test-Path $windowsImageConfig.drivers_path)) {
+            Add-DriversToImage $winImagePath $windowsImageConfig.drivers_path
+        }
+        if ($windowsImageConfig.virtio_iso_path) {
+            Add-VirtIODriversFromISO -vhdDriveLetter $winImagePath -image $image `
+                -isoPath $windowsImageConfig.virtio_iso_path
+        }
+        if ($windowsImageConfig.virtio_base_path) {
+            Add-VirtIODrivers -vhdDriveLetter $winImagePath -image $image `
+                -driversBasePath $windowsImageConfig.virtio_base_path
+        }
+        if ($windowsImageConfig.extra_features) {
+            & "Enable-FeaturesInImage_$PLATFORM" $winImagePath $windowsImageConfig.extra_features
+        }
+        if ($windowsImageConfig.extra_packages) {
+            foreach ($package in $windowsImageConfig.extra_packages.split(",")) {
+                Add-PackageToImage $winImagePath $package -ignoreErrors $windowsImageConfig.extra_packages_ignore_errors
+            }
+        }
+        if ($windowsImageConfig.extra_capabilities) {
+            Add-CapabilitiesToImage $winImagePath $windowsImageConfig.extra_capabilities
+        }
+    } finally {
+        if (Test-Path $vhdPath) {
+            & "Detach-VirtualDisk_$PLATFORM" $vhdPath $drives[1] $drives[0]
+        }
+    }
+
+    if (!($windowsImageConfig.virtual_disk_format -in @("VHD", "VHDX"))) {
+        Convert-VirtualDisk -vhdPath $vhdPath -outPath $windowsImageConfig.image_path `
+            -format $windowsImageConfig.virtual_disk_format
+        Remove-Item -Force $vhdPath
+    } elseif ($vhdPath -ne $windowsImageConfig.image_path) {
+        Move-Item -Force $vhdPath $windowsImageConfig.image_path
+    }
+
+    if ($windowsImageConfig.compression_format) {
+            & "Compress-Image_$PLATFORM" -VirtualDiskPath $windowsImageConfig.image_path `
+                -ImagePath $windowsImageConfig['image_path'] `
+                -compressionFormats $windowsImageConfig.compression_format `
+                -ZipPassword $windowsImageConfig.zip_password
+        }
+    Write-Log "Cloud image generation finished."
+    } finally {
+        if($mountedWindowsIso){
+            $mountedWindowsIso.DetachVirtualDisk()
+        }
+    }
+}
+
 function New-WindowsOnlineImage {
     <#
     .SYNOPSIS
@@ -1427,156 +1773,6 @@ function New-WindowsOnlineImage {
         Throw
     }
     Write-Log "Windows online image generation finished."
-}
-
-function New-WindowsCloudImage {
-    <#
-    .SYNOPSIS
-     This function creates a Windows Image, starting from an ISO file, without the need
-     of Hyper-V to be enabled. The image, to become ready for cloud usage, needs to be
-     started on a hypervisor and it will automatically shut down when it finishes all the
-     operations needed to become cloud ready: cloudbase-init installation, updates and sysprep.
-    .DESCRIPTION
-     This script can generate a Windows Image in one of the following formats: VHD,
-     VHDX, QCow2, VMDK or RAW. It takes the Windows flavor indicated by the ImageName
-     from the WIM file and based on the parameters given, it will generate an image.
-     This function does not require Hyper-V to be enabled, but the generated image
-     is not ready to be deployed, as it needs to be started manually on another hypervisor.
-     The image is ready to be used when it shuts down.
-
-     The list of parameters can be found in the Config.psm1 file.
-    #>
-    param
-    (
-        [parameter(Mandatory=$true, ValueFromPipeline=$true)]
-        [string]$ConfigFilePath
-    )
-    Write-Log "Cloud image generation started."
-    try {
-    $windowsImageConfig = Get-WindowsImageConfig -ConfigFilePath $ConfigFilePath
-    $mountedWindowsIso = $null
-    if ($windowsImageConfig.wim_file_path.EndsWith('.iso')) {
-        $windowsImageConfig.wim_file_path = get-command $windowsImageConfig.wim_file_path -erroraction ignore | Select-Object -ExpandProperty Source
-        if($windowsImageConfig.wim_file_path -eq $null){
-            throw ("Unable to find source iso. Either specify the full path or add the folder containing the iso to the path variable")
-        }
-        
-        $mountedWindowsIso = [WIMInterop.VirtualDisk]::OpenVirtualDisk($windowsImageConfig.wim_file_path)
-        $mountedWindowsIso.AttachVirtualDisk()
-        $devicePath = $mountedWindowsIso.GetVirtualDiskPhysicalPath()
-        $basePath = ((Get-DiskImage -DevicePath $devicePath `
-                | Get-Volume).DriveLetter) + ":"
-        $windowsImageConfig.wim_file_path = "$($basePath)\Sources\install.wim"
-    }
-    
-    Validate-WindowsImageConfig $windowsImageConfig
-    Set-DotNetCWD
-    Is-Administrator
-    $image = Get-WimFileImagesInfo -WimFilePath $windowsImageConfig.wim_file_path | `
-        Where-Object { $_.ImageName -eq $windowsImageConfig.image_name }
-    if (!$image) {
-        throw ("Image {0} not found in WIM file {1}" -f @($windowsImageConfig.image_name, $windowsImageConfig.wim_file_path))
-    }
-    Check-DismVersionForImage $image
-
-    if (Test-Path $windowsImageConfig.image_path) {
-        Write-Log "Found already existing image file. Removing it..." -ForegroundColor Yellow
-        Remove-Item -Force $windowsImageConfig.image_path
-        Write-Log "Already existent image file has been removed." -ForegroundColor Yellow
-    }
-
-    $vhdPath = "{0}.vhdx" -f (Get-PathWithoutExtension $windowsImageConfig.image_path)
-    if (Test-Path $vhdPath) {
-        Remove-Item -Force $vhdPath
-    }
-
-    try {
-        $drives = Create-ImageVirtualDisk -VhdPath $vhdPath -Size $windowsImageConfig.disk_size `
-            -DiskLayout $windowsImageConfig.disk_layout
-        $winImagePath = "$($drives[1])\"
-        $resourcesDir = "${winImagePath}UnattendResources"
-        $outUnattendXmlPath = "${winImagePath}Unattend.xml"
-        $xmlunattendPath = Join-Path $scriptPath $windowsImageConfig['unattend_xml_path']
-        $xmlParams = @{'InUnattendXmlPath' = $xmlunattendPath;
-                       'OutUnattendXmlPath' = $outUnattendXmlPath;
-                       'Image' = $image;
-                       'AdministratorPassword' = $windowsImageConfig.administrator_password;
-        }
-        if ($windowsImageConfig.product_key) {
-            $xmlParams.Add('productKey', $windowsImageConfig.product_key);
-        }
-        Generate-UnattendXml @xmlParams
-        Copy-UnattendResources -resourcesDir $resourcesDir -imageInstallationType $image.ImageInstallationType `
-            -InstallMaaSHooks $windowsImageConfig.install_maas_hooks `
-            -VMwareToolsPath $windowsImageConfig.vmware_tools_path
-        Copy-CustomResources -ResourcesDir $resourcesDir -CustomResources $windowsImageConfig.custom_resources_path `
-                             -CustomScripts $windowsImageConfig.custom_scripts_path
-        Copy-Item $ConfigFilePath "$resourcesDir\config.ini"
-        if ($windowsImageConfig.enable_custom_wallpaper) {
-            Set-WindowsWallpaper -WinDrive $winImagePath -WallpaperPath $windowsImageConfig.wallpaper_path `
-                -WallpaperSolidColor $windowsImageConfig.wallpaper_solid_color
-        }
-        if ($windowsImageConfig.zero_unused_volume_sectors) {
-            Download-ZapFree $resourcesDir ([string]$image.ImageArchitecture)
-        }
-        Download-CloudbaseInit -resourcesDir $resourcesDir -osArch ([string]$image.ImageArchitecture) `
-                               -BetaRelease:$windowsImageConfig.beta_release -MsiPath $windowsImageConfig.msi_path `
-                               -CloudbaseInitConfigPath $windowsImageConfig.cloudbase_init_config_path `
-                               -CloudbaseInitUnattendedConfigPath $windowsImageConfig.cloudbase_init_unattended_config_path
-        Apply-Image -winImagePath $winImagePath -wimFilePath $windowsImageConfig.wim_file_path `
-            -imageIndex $image.ImageIndex
-        Create-BCDBootConfig -systemDrive $drives[0] -windowsDrive $drives[1] -diskLayout $windowsImageConfig.disk_layout `
-            -image $image
-        Check-EnablePowerShellInImage $winImagePath $image
-
-        if ($windowsImageConfig.drivers_path -and (Test-Path $windowsImageConfig.drivers_path)) {
-            Add-DriversToImage $winImagePath $windowsImageConfig.drivers_path
-        }
-        if ($windowsImageConfig.virtio_iso_path) {
-            Add-VirtIODriversFromISO -vhdDriveLetter $winImagePath -image $image `
-                -isoPath $windowsImageConfig.virtio_iso_path
-        }
-        if ($windowsImageConfig.virtio_base_path) {
-            Add-VirtIODrivers -vhdDriveLetter $winImagePath -image $image `
-                -driversBasePath $windowsImageConfig.virtio_base_path
-        }
-        if ($windowsImageConfig.extra_features) {
-            Enable-FeaturesInImage $winImagePath $windowsImageConfig.extra_features
-        }
-        if ($windowsImageConfig.extra_packages) {
-            foreach ($package in $windowsImageConfig.extra_packages.split(",")) {
-                Add-PackageToImage $winImagePath $package -ignoreErrors $windowsImageConfig.extra_packages_ignore_errors
-            }
-        }
-        if ($windowsImageConfig.extra_capabilities) {
-            Add-CapabilitiesToImage $winImagePath $windowsImageConfig.extra_capabilities
-        }
-    } finally {
-        if (Test-Path $vhdPath) {
-            Detach-VirtualDisk $vhdPath
-        }
-    }
-
-    if (!($windowsImageConfig.virtual_disk_format -in @("VHD", "VHDX"))) {
-        Convert-VirtualDisk -vhdPath $vhdPath -outPath $windowsImageConfig.image_path `
-            -format $windowsImageConfig.virtual_disk_format
-        Remove-Item -Force $vhdPath
-    } elseif ($vhdPath -ne $windowsImageConfig.image_path) {
-        Move-Item -Force $vhdPath $windowsImageConfig.image_path
-    }
-    
-    if ($windowsImageConfig.compression_format) {
-            Compress-Image -VirtualDiskPath $windowsImageConfig.image_path `
-                -ImagePath $windowsImageConfig['image_path'] `
-                -compressionFormats $windowsImageConfig.compression_format `
-                -ZipPassword $windowsImageConfig.zip_password
-        }
-    Write-Log "Cloud image generation finished."
-    } finally {
-        if($mountedWindowsIso){
-            $mountedWindowsIso.DetachVirtualDisk()
-        }
-    }
 }
 
 function New-WindowsFromGoldenImage {
