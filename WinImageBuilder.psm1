@@ -1820,7 +1820,6 @@ function New-WindowsFromGoldenImage {
         }
 
         if ($windowsImageConfig.compression_format) {
-            $imagePath = $windowsImageConfig['image_path']
             Compress-Image -VirtualDiskPath $imagePath `
                 -ImagePath $windowsImageConfig['image_path'] `
                 -compressionFormats $windowsImageConfig.compression_format `
@@ -1831,15 +1830,12 @@ function New-WindowsFromGoldenImage {
 
         Write-Log "Cloud image from golden image generation finished. Image path: $($windowsImageConfig.image_path)"
     } catch {
-        $vhdDismountLog = ""
         try {
             Get-VHD $windowsImageConfig.gold_image_path | Dismount-VHD
-            Remove-Item -Force $windowsImageConfig.gold_image_path
+            Remove-Item -Force -ErrorActionPreference SilentlyContinue `
+                $windowsImageConfig.gold_image_path
         } catch {
-            $vhdDismountLog = $_
-        }
-        if ($vhdDismountLog) {
-            Write-Log $vhdDismountLog.Message
+            Write-Log $_
         }
         throw $_
     }
