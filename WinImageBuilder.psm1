@@ -1166,6 +1166,12 @@ function Run-Sysprep {
     if ($vmAutomaticCheckpointsEnabled) {
        Set-VM -VMName $Name -AutomaticCheckpointsEnabled:$false
     }
+
+    # Note(avladu): If VirtIO drivers are installed, the VM won't boot
+    if ($Generation -eq "2") {
+        Set-VMFirmware -VMName $Name -EnableSecureBoot Off
+    }
+
     Write-Log "Starting $Name"
     Start-VM $Name | Out-Null
     Start-Sleep 5
