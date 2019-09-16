@@ -373,6 +373,22 @@ function Disable-FirstLogonAnimation {
     }
 }
 
+function Disable-UserLockout {
+    New-ItemProperty `
+        -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" `
+        -Name "InactivityTimeoutSecs" `
+        -PropertyType "DWord" `
+        -Value "0" -Force | Out-Null
+}
+
+function Enable-HighPerformanceMode {
+    powercfg.exe /setactive "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+    if ($LASTEXITCODE) {
+        throw "Could not set high performance mode"
+    }
+    Write-Log "High performance mode has been set"
+}
+
 try {
     Write-Log "StatusInitial" "Automated instance configuration started..."
     Import-Module "$resourcesDir\ini.psm1"
@@ -405,6 +421,14 @@ try {
     } catch {}
     try {
         $disableFirstLogonAnimation = Get-IniFileValue -Path $configIniPath -Section "DEFAULT" -Key "disable_first_logon_animation" `
+            -Default $false -AsBoolean
+    } catch{}
+    try {
+        $disableUserLockout = Get-IniFileValue -Path $configIniPath -Section "DEFAULT" -Key "disable_user_lockout" `
+            -Default $false -AsBoolean
+    } catch{}
+    try {
+        $enableHighPerformance = Get-IniFileValue -Path $configIniPath -Section "DEFAULT" -Key "enable_high_performance" `
             -Default $false -AsBoolean
     } catch{}
 
@@ -499,6 +523,14 @@ try {
         Set-NetIPv6Protocol -UseTemporaryAddresses Disabled
     }
 
+    if ($disableUserLockout) {
+        Disable-UserLockout
+    }
+
+    if ($enableHighPerformance) {
+        Enable-HighPerformanceMode
+    }
+
     if (Is-WindowsClient -and $enableAdministrator) {
         Enable-AdministratorAccount
     }
@@ -522,6 +554,7 @@ try {
     Clean-UpdateResources
     Write-Log "StatusFinal" "Waiting for sysprep to stop machine..."
 } catch {
+    Write-Log "Error: $($_.Exception.ToString())"
     $host.ui.WriteErrorLine($_.Exception.ToString())
     $x = $host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     throw
