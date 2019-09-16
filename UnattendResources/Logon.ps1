@@ -373,6 +373,16 @@ function Disable-FirstLogonAnimation {
     }
 }
 
+function Disable-ScreenSaver {
+    New-ItemProperty `
+        -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" `
+        -Name "InactivityTimeoutSecs" `
+        -PropertyType "DWord" `
+        -Value "0" -Force | Out-Null
+
+    powercfg.exe /setactive "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+}
+
 try {
     Write-Log "StatusInitial" "Automated instance configuration started..."
     Import-Module "$resourcesDir\ini.psm1"
@@ -498,6 +508,8 @@ try {
         Set-NetIPv6Protocol -RandomizeIdentifiers Disabled
         Set-NetIPv6Protocol -UseTemporaryAddresses Disabled
     }
+
+    Disable-ScreenSaver
 
     if (Is-WindowsClient -and $enableAdministrator) {
         Enable-AdministratorAccount
