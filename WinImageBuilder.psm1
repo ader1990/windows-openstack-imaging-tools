@@ -1169,7 +1169,9 @@ function Run-Sysprep {
         [string]$VMSwitch,
         [ValidateSet("1", "2")]
         [string]$Generation = "1",
-        [switch]$DisableSecureBoot
+        [switch]$DisableSecureBoot,
+        [switch]$NoWait,
+        [string]$CustomIso
     )
 
     Write-Log "Creating VM $Name attached to $VMSwitch"
@@ -1190,11 +1192,16 @@ function Run-Sysprep {
     if ($DisableSecureBoot -and $Generation -eq "2") {
          Set-VMFirmware -VMName $Name -EnableSecureBoot Off
     }
+    if ($CustomIso) {
+        Add-VMDvdDrive -VMName $Name -Path $CustomIso
+    }
     Write-Log "Starting $Name"
     Start-VM $Name | Out-Null
     Start-Sleep 5
-    Wait-ForVMShutdown $Name
-    Remove-VM $Name -Confirm:$false -Force
+    if (!$NoWait) {
+        Wait-ForVMShutdown $Name
+        Remove-VM $Name -Confirm:$false -Force
+    }
 }
 
 function Convert-KvpData($xmlData) {
@@ -1765,12 +1772,22 @@ function New-WindowsFromGoldenImage {
         } | Out-Null
 
         Mount-VHD -Path $windowsImageConfig.gold_image_path -Passthru | Out-Null
-        Get-PSDrive | Out-Null
-
-        $driveNumber = (Get-DiskImage -ImagePath $windowsImageConfig.gold_image_path | Get-Disk).Number
-        $partition = Get-Partition -DiskNumber $driveNumber | Where-Object {@("Basic", "IFS") -contains $_.Type}
-        if (!$partition -or !$partition.DriveLetter) {
-            throw "Partition not found for mounted $($windowsImageConfig.gold_image_path)"
+        $driveNumber = Execute-Retry {
+            Get-PSDrive | Out-Null
+            $driveNumber = (Get-DiskImage -ImagePath $windowsImageConfig.gold_image_path | Get-Disk).Number
+            if ($driveNumber -eq $null) {
+                throw "Could not retrieve drive number for mounted vhd"
+            }
+            return $driveNumber
+        }
+        $partition = Execute-Retry {
+            Get-PSDrive | Out-Null
+            Set-Disk -Number $driveNumber -IsOffline $False
+            $partition = Get-Partition -DiskNumber $driveNumber | Where-Object {@("Basic", "IFS") -contains $_.Type}
+            if (!$partition -or !$partition.DriveLetter) {
+                throw "Partition not found for mounted $($windowsImageConfig.gold_image_path)"
+            }
+            return $partition
         }
         $driveLetterGold = $partition.DriveLetter + ":"
         Write-Log "The mount point for the gold image is: ${driveLetterGold}"
@@ -1882,8 +1899,57 @@ function New-WindowsFromGoldenImage {
     }
 }
 
+function Get-WinRMSession {
+    param(
+        [string]$VmName,
+        [string]$Username,
+        [string]$Password
+    )
 
-function Test-OfflineWindowsImage {
+    $maxIpRetries = 30
+    $ipRetries = 0
+    $ip = ""
+    $currentSession = ""
+    while ($ipRetries -lt $maxIpRetries) {
+        $ipAddresses = Get-VMNetworkAdapter -VMName $vmName | Where-Object `
+            { $_.Status -and $_.IPAddresses } | `
+            Select-Object -First 1 | Select-Object -Property IPAddresses
+        if ($ipAddresses -and $ipAddresses.IPAddresses) {
+            $ip = $ipAddresses.IPAddresses | Where-Object { ([ipaddress]$_).AddressFamily -eq "InterNetwork" }
+            if ($ip) {
+                $secureWinAdminPass = $Password | ConvertTo-SecureString -AsPlainText -Force
+                $authCredentials = New-Object -TypeName `
+                    System.Management.Automation.PSCredential -ArgumentList $Username, $secureWinAdminPass
+                $sessionOptions = New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck
+                $currentSession = ""
+                try {
+                    $currentSession = New-PSSession -ComputerName $ip -UseSSL `
+                        -SessionOption $sessionOptions -Authentication Basic -Credential $authCredentials
+                } catch {
+                    Write-Log "Could not create WinRM HTTPS session to IP ${ip}"
+                }
+                if (!$currentSession) {
+                    try {
+                        $currentSession = New-PSSession -ComputerName $ip -Credential $authCredentials `
+                            -Authentication Basic
+                    } catch {
+                        Write-Log "Could not create WinRM HTTP session to IP ${ip}"
+                    }
+                }
+                if ($currentSession) {
+                    break
+                }
+            }
+        } else {
+            Write-Log "Could not retrieve IPv4 IP for ${vmName}"
+        }
+        $ipRetries += 1
+        Start-Sleep 30
+    }
+    return $currentSession
+}
+
+function Test-WindowsImage {
     <#
     .SYNOPSIS
      This function verifies if a Windows image has been properly generated according to
@@ -1904,7 +1970,9 @@ function Test-OfflineWindowsImage {
     [CmdletBinding()]
     Param(
         [parameter(Mandatory=$true, ValueFromPipeline=$true)]
-        [string]$ConfigFilePath
+        [string]$ConfigFilePath,
+        [switch]$Online,
+        [string]$CustomIso
     )
 
     Write-Log "Offline Windows image validation started."
@@ -1916,6 +1984,7 @@ function Test-OfflineWindowsImage {
     }
 
     $imageChain = @()
+    $vmName = "WindowsOnlineImage-Test" + (Get-Random)
     $imagePath = $windowsImageConfig.image_path
 
     try {
@@ -1992,6 +2061,8 @@ function Test-OfflineWindowsImage {
         try {
             Get-PSDrive | Out-Null
             $driveNumber = (Get-DiskImage -ImagePath $imagePath | Get-Disk).Number
+            Set-Disk -Number $driveNumber -IsOffline $False
+            Get-PSDrive | Out-Null
             $mountPoint = (Get-Partition -DiskNumber $driveNumber | `
                 Where-Object {@("Basic", "IFS") -contains $_.Type}).DriveLetter + ":"
 
@@ -2006,7 +2077,7 @@ function Test-OfflineWindowsImage {
             }
 
             # Test if curtin modules are installed
-            if ($windowsImageConfig.install_maas_hooks -or $windowsImageConfig.image_type -eq "MAAS") {
+            if ($windowsImageConfig.install_maas_hooks) {
                 if (Test-Path (Join-Path $mountPoint "curtin")) {
                     Write-Log "Curtin hooks are installed."
                 } else {
@@ -2016,18 +2087,74 @@ function Test-OfflineWindowsImage {
 
             # Test if extra drivers are installed
             if ($windowsImageConfig.virtio_iso_path -or $windowsImageConfig.virtio_base_path `
-                    -or $windowsImageConfig.drivers_path -or $windowsImageConfig.image_type -eq "KVM") {
-                $extraDriversNr = (Get-Item "$mountPoint\Windows\INF\OEM*.inf" | Measure-Object).Count
-                if ($extraDriversNr) {
-                    Write-Log "Found ${extraDriversNr} extra drivers installed."
-                } else {
-                    throw "No extra drivers installed on the image."
+                    -or $windowsImageConfig.drivers_path) {
+                $dismDriversOutput = (& Dism.exe /image:$mountPoint /Get-Drivers /Format:Table)
+                $allDrivers = (Select-String "oem" -InputObject $dismDriversOutput -AllMatches).Matches.Count
+                $virtDrivers = (Select-String "Red Hat, Inc." -InputObject $dismDriversOutput -AllMatches).Matches.Count
+                $virtDrivers += (Select-String "QEMU" -InputObject $dismDriversOutput `
+                    -AllMatches -CaseSensitive).Matches.Count
+                Write-Log "Found ${allDrivers} drivers, from which ${virtDrivers} are VirtIO drivers."
+                $minDriversCount = 1
+                if ($windowsImageConfig.virtio_iso_path -or $windowsImageConfig.virtio_base_path) {
+                    $minDriversCount = $VirtIODrivers.Count - 1 + ($allDrivers - $virtDrivers)
+                }
+                if ($allDrivers -lt $minDriversCount) {
+                    throw "Expected ${minDriversCount} ! >= ${allDrivers} drivers installed on the image."
                 }
             }
         } finally {
             Dismount-VHD $imagePath
         }
+        Write-Log "Offline Windows image validation finished."
+
+        if (!$Online) {
+            return
+        }
+
+        Write-Log "Online Windows image validation started."
+        # Run the online testing
+        # A vm will be created using the backing VHDX from the previous stage.
+        # The VM will have a config drive attached and cloudbase-init will run automatically.
+        # After the instance gets an IP, that IP will be retrieved and a WINRM session will be created
+        # using a known username and password.
+        # Afterwards, cloudbase-init logs will be checked, a report wil be created with the image details and
+        # a custom test script will be run.
+        # The VM will be removed after the testing process is finished.
+        if($windowsImageConfig.disk_layout -eq "UEFI") {
+            $generation = "2"
+        } else {
+            $generation = "1"
+        }
+
+        Run-Sysprep -Name $vmName -Memory $windowsImageConfig.ram_size -vhdPath $imagePath `
+            -VMSwitch $windowsImageConfig.external_switch -CpuCores $windowsImageConfig.cpu_count `
+            -Generation $generation -NoWait:$true -DisableSecureBoot:$windowsImageConfig.disable_secure_boot `
+            -CustomIso $CustomIso
+
+        $currentSession = Get-WinRMSession -VMName $vmName -Username "Administrator" `
+            -Password $windowsImageConfig.administrator_password
+        if (!$currentSession) {
+            throw "Could not connect via WinRM to VM ${vmName}"
+        } else {
+            Write-Log "Connected via WinRM to VM ${vmName}"
+        }
+
+        $cloudbaseInitLogs = Invoke-Command -Session $currentSession {
+            $cbsInitLogPath = 'C:\Program Files\Cloudbase Solutions\Cloudbase-Init\log\cloudbase-init.log'
+            $logContent = Get-Content -Raw $cbsInitLogPath
+            $afterLoading = $logContent.IndexOf("Config Drive found on")
+            $logContent.substring($afterLoading)
+        }
+        Remove-PSSession $currentSession -ErrorAction SilentlyContinue
+        if ($cloudbaseInitLogs -like "*error*" -or $cloudbaseInitLogs -like "*fail*") {
+            Write-Log "Cloudbase-Init logs contain errors: ${cloudbaseInitLogs}"
+        } else {
+            Write-Log "Cloudbase-Init ran successfuly: ${cloudbaseInitLogs}"
+        }
+        Write-Log "Online Windows image validation finished."
     } finally {
+        Stop-VM -Name $vmName -TurnOff -ErrorAction SilentlyContinue
+        Remove-VM -Force -Confirm:$false -Name $vmName -ErrorAction SilentlyContinue
         [array]::Reverse($imageChain)
         foreach ($chainItem in $imageChain) {
             if ($chainItem -ne $windowsImageConfig.image_path) {
@@ -2035,11 +2162,10 @@ function Test-OfflineWindowsImage {
                 Remove-Item -Force $chainItem -ErrorAction SilentlyContinue
             }
         }
-        Write-Log "Offline Windows image validation finished."
     }
 }
 
 
 Export-ModuleMember New-WindowsCloudImage, Get-WimFileImagesInfo, New-MaaSImage, Resize-VHDImage,
     New-WindowsOnlineImage, Add-VirtIODriversFromISO, New-WindowsFromGoldenImage, Get-WindowsImageConfig,
-    New-WindowsImageConfig, Test-OfflineWindowsImage
+    New-WindowsImageConfig, Test-WindowsImage
