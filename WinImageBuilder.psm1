@@ -2158,7 +2158,7 @@ function Test-OnlineWindowsImage {
         Run-Sysprep -Name $vmName -Memory $windowsImageConfig.ram_size -vhdPath $imagePath `
             -VMSwitch $windowsImageConfig.external_switch -CpuCores $windowsImageConfig.cpu_count `
             -Generation $generation -NoWait:$true -DisableSecureBoot:$windowsImageConfig.disable_secure_boot
-        Set-VMDvdDrive -VMName $vmName -Path "C:\custom_metadata\cloudbase-init-metadata.iso"
+        Add-VMDvdDrive -VMName $vmName -Path "C:\custom_metadata\cloudbase-init-metadata.iso"
         $maxIpRetries = 30
         $ipRetries = 0
         $ip = ""
