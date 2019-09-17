@@ -1151,7 +1151,8 @@ function Run-Sysprep {
         [string]$VMSwitch,
         [ValidateSet("1", "2")]
         [string]$Generation = "1",
-        [switch]$NoWait
+        [switch]$NoWait,
+        [switch]$DisableSecureBoot
     )
 
     Write-Log "Creating VM $Name attached to $VMSwitch"
@@ -1168,6 +1169,9 @@ function Run-Sysprep {
     }
     if ($vmAutomaticCheckpointsEnabled) {
        Set-VM -VMName $Name -AutomaticCheckpointsEnabled:$false
+    }
+    if ($DisableSecureBoot -and $Generation -eq "2") {
+         Set-VMFirmware -VMName $Name -EnableSecureBoot Off
     }
     Write-Log "Starting $Name"
     Start-VM $Name | Out-Null
@@ -1458,7 +1462,7 @@ function New-WindowsOnlineImage {
             $Name = "WindowsOnlineImage-Sysprep" + (Get-Random)
             Run-Sysprep -Name $Name -Memory $windowsImageConfig.ram_size -vhdPath $virtualDiskPath `
                 -VMSwitch $switch.Name -CpuCores $windowsImageConfig.cpu_count `
-                -Generation $generation
+                -Generation $generation -DisableSecureBoot:$windowsImageConfig.disable_secure_boot
         }
 
         if ($windowsImageConfig.shrink_image_to_minimum_size -eq $true) {
@@ -1777,7 +1781,7 @@ function New-WindowsFromGoldenImage {
             $Name = "WindowsGoldImage-Sysprep" + (Get-Random)
             Run-Sysprep -Name $Name -Memory $windowsImageConfig.ram_size -vhdPath $windowsImageConfig.gold_image_path `
                 -VMSwitch $switch.Name -CpuCores $windowsImageConfig.cpu_count `
-                -Generation $generation
+                -Generation $generation -DisableSecureBoot:$windowsImageConfig.disable_secure_boot
         }
 
         if ($windowsImageConfig.shrink_image_to_minimum_size -eq $true) {
@@ -2153,7 +2157,7 @@ function Test-OnlineWindowsImage {
         $vmName = "WindowsOnlineImage-Test" + (Get-Random)
         Run-Sysprep -Name $vmName -Memory $windowsImageConfig.ram_size -vhdPath $imagePath `
             -VMSwitch $windowsImageConfig.external_switch -CpuCores $windowsImageConfig.cpu_count `
-            -Generation $generation -NoWait:$true
+            -Generation $generation -NoWait:$true -DisableSecureBoot:$windowsImageConfig.disable_secure_boot
         Set-VMDvdDrive -VMName $vmName -Path "C:\custom_metadata\cloudbase-init-metadata.iso"
         $maxIpRetries = 30
         $ipRetries = 0
