@@ -1150,7 +1150,8 @@ function Run-Sysprep {
         [Parameter(Mandatory=$true)]
         [string]$VMSwitch,
         [ValidateSet("1", "2")]
-        [string]$Generation = "1"
+        [string]$Generation = "1",
+        [switch]$NoWait
     )
 
     Write-Log "Creating VM $Name attached to $VMSwitch"
@@ -1171,8 +1172,10 @@ function Run-Sysprep {
     Write-Log "Starting $Name"
     Start-VM $Name | Out-Null
     Start-Sleep 5
-    Wait-ForVMShutdown $Name
-    Remove-VM $Name -Confirm:$false -Force
+    if (!$NoWait) {
+        Wait-ForVMShutdown $Name
+        Remove-VM $Name -Confirm:$false -Force
+    }
 }
 
 function Convert-KvpData($xmlData) {
@@ -1989,7 +1992,230 @@ function Test-OfflineWindowsImage {
     }
 }
 
+function Test-OnlineWindowsImage {
+    <#
+    .SYNOPSIS
+     This function verifies if a Windows image has been properly generated according to
+     the configuration file. The verification is performed offline, without instantiating
+     the image.
+    .DESCRIPTION
+     This function first tests if the config.image_path exists, then uses the extension and the
+     config.compression_format to detect the compression and qemu-img binary to detect
+     the image format.
+     If any compression is detected, a decompression is performed for each compression.
+     If the image format is other than vhdx, "qemu-img convert -O vhdx" is performed.
+     The vhdx is mounted and the following checks are performed:
+       1. If Cloudbase-Init folder exists
+       2. If curtin (for MAAS) folder exists
+       3. If OEM drivers are installed
+     Finally, the full chain of decompressed/converted files is removed.
+     #>
+    [CmdletBinding()]
+    Param(
+        [parameter(Mandatory=$true, ValueFromPipeline=$true)]
+        [string]$ConfigFilePath
+    )
+
+    Write-Log "Offline Windows image validation started."
+    $windowsImageConfig = Get-WindowsImageConfig -ConfigFilePath $ConfigFilePath
+    Is-Administrator
+
+    if (!(Test-Path $windowsImageConfig.image_path)) {
+        throw "Image validation failed: $($windowsImageConfig.image_path) does not exist."
+    }
+
+    $imageChain = @()
+    $imagePath = $windowsImageConfig.image_path
+
+    try {
+        if ($windowsImageConfig.compression_format) {
+            $compressionFormats = $windowsImageConfig.compression_format.split(".")
+            [array]::Reverse($compressionFormats)
+            $invalidCompressionFormat = $compressionFormats | Where-Object `
+                {$AvailableCompressionFormats -notcontains $_}
+            if ($invalidCompressionFormat) {
+                throw "Compression format $invalidCompressionFormat not available."
+            } else {
+                Write-Log "Compression format ${invalidCompressionFormat} is available."
+            }
+            foreach($compressionFormat in $compressionFormats) {
+                $imageToDecompress = $imagePath
+                $imagePath = Decompress-File -FilePath $imageToDecompress `
+                    -CompressionFormat $compressionFormat `
+                    -ZipPassword $windowsImageConfig.zip_password
+                Write-Log "Image ${imageToDecompress} decompressed to ${imagePath}"
+                $imageChain += $imagePath
+            }
+        }
+
+        $imageFileExtension = [System.IO.Path]::GetExtension($imagePath)
+        $fileExtension = '*'
+        $diskFormat = '*'
+        if ($windowsImageConfig.image_type -eq "HYPER-V") {
+            $fileExtension = 'vhdx'
+            $diskFormat = 'vhdx'
+            if ($imageFileExtension -eq '.vhd') {
+                $fileExtension = 'vhd'
+                $diskFormat = 'vpc'
+            }
+        }
+        if ($windowsImageConfig.image_type -eq "KVM") {
+            $fileExtension = 'qcow2'
+            $diskFormat = 'qcow2'
+        }
+        if ($windowsImageConfig.image_type -eq "MAAS") {
+            $fileExtension = 'raw'
+            $diskFormat = 'raw'
+        }
+
+        if (!([System.IO.Path]::GetExtension($imagePath) -like ".${fileExtension}")) {
+            throw "${imagePath} does not have ${fileExtension} extension."
+        } else {
+            Write-Log "${imagePath} has the correct ${fileExtension} extension."
+        }
+
+        $qemuInfoOutput = & "$scriptPath\bin\qemu-img.exe" info --output=json $imagePath
+        $qemuInfoJson = ConvertFrom-Json ($qemuInfoOutput -join "")
+        $qemuImgFormat = $qemuInfoJson | Select-Object "Format"
+        if ($qemuImgFormat.Format -ne $diskFormat) {
+            throw "${imagePath} does not have ${diskFormat} format."
+        } else {
+            Write-Log "${imagePath} has the correct ${diskFormat} format."
+        }
+
+        if (!(@("vhd", "vhdx").Contains($fileExtension))) {
+            $barePath = Get-PathWithoutExtension $imagePath
+            $tempImagePath = $barePath + ".vhdx"
+            Convert-VirtualDisk -vhdPath $imagePath -outPath $tempImagePath `
+                -format "vhdx"
+            $imagePath = $tempImagePath
+            $imageChain += $imagePath
+        }
+
+        $childImagePath = $imagePath -ireplace ".vhd", "_bak.vhd"
+        New-VHD -ParentPath $imagePath -Path $childImagePath | Out-Null
+        $imagePath = $childImagePath
+        $imageChain += $imagePath
+        Mount-VHD -Path $imagePath -Passthru | Out-Null
+
+        try {
+            Get-PSDrive | Out-Null
+            $driveNumber = (Get-DiskImage -ImagePath $imagePath | Get-Disk).Number
+            $mountPoint = (Get-Partition -DiskNumber $driveNumber | `
+                Where-Object {@("Basic", "IFS") -contains $_.Type}).DriveLetter + ":"
+
+            # Test if Cloudbase-Init is installed
+            $cloudbaseInitPath = "Program Files\Cloudbase Solutions\Cloudbase-Init"
+            $cloudbaseInitPathX86 = "${cloudbaseInitPath} (x86)"
+            if ((Test-Path (Join-Path $mountPoint $cloudbaseInitPath)) -or `
+                (Test-Path (Join-Path $mountPoint $cloudbaseInitPathX86))) {
+                Write-Log "Cloudbase-Init is installed."
+            } else {
+                throw "Cloudbase-Init is not installed on the image."
+            }
+
+            # Test if curtin modules are installed
+            if ($windowsImageConfig.install_maas_hooks -or $windowsImageConfig.image_type -eq "MAAS") {
+                if (Test-Path (Join-Path $mountPoint "curtin")) {
+                    Write-Log "Curtin hooks are installed."
+                } else {
+                    throw "Curtin hooks are not installed on the image."
+                }
+            }
+
+            # Test if extra drivers are installed
+            if ($windowsImageConfig.virtio_iso_path -or $windowsImageConfig.virtio_base_path `
+                    -or $windowsImageConfig.drivers_path -or $windowsImageConfig.image_type -eq "KVM") {
+                $extraDriversNr = (Get-Item "$mountPoint\Windows\INF\OEM*.inf" | Measure-Object).Count
+                if ($extraDriversNr) {
+                    Write-Log "Found ${extraDriversNr} extra drivers installed."
+                } else {
+                    throw "No extra drivers installed on the image."
+                }
+            }
+        } finally {
+            Dismount-VHD $imagePath
+        }
+
+        # Run the online testing
+        # A vm will be created using the backing VHDX from the previous stage.
+        # The VM will have a config drive attached and cloudbase-init will run automatically.
+        # After the instance gets an IP, that IP will be retrieved and a WINRM session will be created
+        # using a known username and password.
+        # Afterwards, cloudbase-init logs will be checked, a report wil be created with the image details and
+        # a custom test script will be run.
+        # The VM will be removed after the testing process is finished.
+        if($windowsImageConfig.disk_layout -eq "UEFI") {
+            $generation = "2"
+        } else {
+            $generation = "1"
+        }
+        $vmName = "WindowsOnlineImage-Test" + (Get-Random)
+        Run-Sysprep -Name $vmName -Memory $windowsImageConfig.ram_size -vhdPath $imagePath `
+            -VMSwitch $windowsImageConfig.external_switch -CpuCores $windowsImageConfig.cpu_count `
+            -Generation $generation -NoWait:$true
+        Set-VMDvdDrive -VMName $vmName -Path "C:\custom_metadata\cloudbase-init-metadata.iso"
+        $maxIpRetries = 30
+        $ipRetries = 0
+        $ip = ""
+        $currentSession = ""
+        while ($ipRetries -lt $maxIpRetries) {
+            $ipAddresses = Get-VMNetworkAdapter -VMName $vmName | Where-Object `
+                { $_.Status -and $_.IPAddresses } | `
+                Select-Object -First 1 | Select-Object -Property IPAddresses
+            if ($ipAddresses -and $ipAddresses.IPAddresses) {
+                $ip = $ipAddresses.IPAddresses | Where-Object { ([ipaddress]$_).AddressFamily -eq "InterNetwork" }
+                if ($ip) {
+                    $secureWinAdminPass = $windowsImageConfig.administrator_password | ConvertTo-SecureString -AsPlainText -Force
+                    $authCredentials = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList "Administrator", $secureWinAdminPass
+                    $sessionOptions = New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck
+                    $currentSession = New-PSSession -ComputerName $ip -UseSSL `
+                        -SessionOption $sessionOptions -Authentication Basic -Credential $authCredentials `
+                        -ErrorAction SilentlyContinue
+                    if ($currentSession) {
+                        break
+                    } else {
+                        Write-Log "Could not create WinRM session to ${ip}"
+                    }
+                }
+            } else {
+                Write-Log "Could not retrieve IPv4 IP for ${vmName}"
+            }
+            $ipRetries += 1
+            Start-Sleep 30
+        }
+        if (!$currentSession) {
+            throw "Could not connect via WinRM to VM ${vmName}"
+        } else {
+            Write-Log "Connected via WinRM to IP ${ip}"
+        }
+
+        $cloudbaseInitLogs = Invoke-Command -Session $currentSession {
+            $logContent = Get-Content -Raw 'C:\Program Files\Cloudbase Solutions\Cloudbase-Init\log\cloudbase-init.log'
+            $afterLoading = $logContent.IndexOf("Config Drive found on")
+            $logContent.substring($afterLoading + 1)
+        }
+        if ($cloudbaseInitLogs -like "*error*" -or $cloudbaseInitLogs -like "*fail*") {
+            Write-Log "Cloudbase-Init logs contain errors: ${cloudbaseInitLogs}"
+        } else {
+            Write-Log "Cloudbase-Init ran successfuly: ${cloudbaseInitLogs}"
+        }
+        Remove-PSSession $currentSession
+    } finally {
+        Stop-VM -Name $vmName -TurnOff -ErrorAction SilentlyContinue
+        Remove-VM -Force -Confirm:$false -Name $vmName -ErrorAction SilentlyContinue
+        [array]::Reverse($imageChain)
+        foreach ($chainItem in $imageChain) {
+            if ($chainItem -ne $windowsImageConfig.image_path) {
+                Write-Log "Removing chain file item ${chainItem}"
+                Remove-Item -Force $chainItem -ErrorAction SilentlyContinue
+            }
+        }
+        Write-Log "Offline Windows image validation finished."
+    }
+}
+
 
 Export-ModuleMember New-WindowsCloudImage, Get-WimFileImagesInfo, New-MaaSImage, Resize-VHDImage,
     New-WindowsOnlineImage, Add-VirtIODriversFromISO, New-WindowsFromGoldenImage, Get-WindowsImageConfig,
-    New-WindowsImageConfig, Test-OfflineWindowsImage
+    New-WindowsImageConfig, Test-OfflineWindowsImage, Test-OnlineWindowsImage
