@@ -1993,10 +1993,14 @@ function Test-OfflineWindowsImage {
             if ($windowsImageConfig.virtio_iso_path -or $windowsImageConfig.virtio_base_path `
                     -or $windowsImageConfig.drivers_path -or $windowsImageConfig.image_type -eq "KVM") {
                 $extraDriversNr = (Get-Item "$mountPoint\Windows\INF\OEM*.inf" | Measure-Object).Count
-                if ($extraDriversNr) {
+                $minDriversCount = 1
+                if ($windowsImageConfig.image_type -eq "KVM") {
+                    $minDriversCount = 11
+                }
+                if ($extraDriversNr -ge $minDriversCount) {
                     Write-Log "Found ${extraDriversNr} extra drivers installed."
                 } else {
-                    throw "No extra drivers installed on the image."
+                    throw "Expected ${minDriversCount} ! greater or equal the ${extraDriversNr} drivers installed on the image."
                 }
             }
         } finally {
@@ -2150,10 +2154,14 @@ function Test-OnlineWindowsImage {
             if ($windowsImageConfig.virtio_iso_path -or $windowsImageConfig.virtio_base_path `
                     -or $windowsImageConfig.drivers_path -or $windowsImageConfig.image_type -eq "KVM") {
                 $extraDriversNr = (Get-Item "$mountPoint\Windows\INF\OEM*.inf" | Measure-Object).Count
-                if ($extraDriversNr) {
+                $minDriversCount = 1
+                if ($windowsImageConfig.image_type -eq "KVM") {
+                    $minDriversCount = 11
+                }
+                if ($extraDriversNr -ge $minDriversCount) {
                     Write-Log "Found ${extraDriversNr} extra drivers installed."
                 } else {
-                    throw "No extra drivers installed on the image."
+                    throw "Expected ${minDriversCount} ! greater or equal the ${extraDriversNr} drivers installed on the image."
                 }
             }
         } finally {
