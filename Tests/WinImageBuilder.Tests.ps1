@@ -235,7 +235,7 @@ Describe "Test New-WindowsOnlineImage" {
     Mock Optimize-VHD -Verifiable -ModuleName $moduleName { return 0 }
     Mock Get-VMSwitch -Verifiable -ModuleName $moduleName { return @{"Name"="external";"SwitchType"="External"} }
 
-    It "Should create an online image" {
+    Its "Should create an online image" {
         New-WindowsOnlineImage -ConfigFilePath $fakeConfigPath | Should -Contain 0
     }
 
