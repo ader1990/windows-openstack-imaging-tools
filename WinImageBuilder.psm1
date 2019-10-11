@@ -781,6 +781,17 @@ function Add-VirtIODrivers {
     Write-Log "Virtual IO Drivers was added."
 }
 
+function Get-MountPoints {
+    Param(
+        $SizeFilter
+    )
+    $mountPoints = Get-WmiObject Win32_CDROMDrive | Where-Object `
+                    { $_.Size -eq $SizeFilter }
+    if ($mountPoints) {
+        return $mountPoints.Drive
+    }
+}
+
 function Add-VirtIODriversFromISO {
     <#
     .SYNOPSIS
@@ -808,16 +819,44 @@ function Add-VirtIODriversFromISO {
         [string]$isoPath
     )
     Write-Log "Adding Virtual IO Drivers from ISO: $isoPath..."
+    $diskImageInfo = Get-DiskImage $isoPath -ErrorAction SilentlyContinue
+    $mountPoint = $null
+    $multipleMountPoints = $false
+    $previousMounts = $null
+    $isoPathCpy = $isoPath
+    if ($diskImageInfo -and $diskImageInfo.DevicePath) {
+        $previousMounts = Get-MountPoints $diskImageInfo.Size
+        Write-Log ("Warning: $isoPath is already mounted on " + `
+            ($previousMounts -join ' ') + `
+            ". Creating a temporary iso copy for safe mount/unmount.")
+        $isoPathBak = $isoPath + (Get-Random) + ".iso"
+        Copy-Item $isoPath $isoPathBak -Force
+        $isoPath = $isoPathBak
+    }
     $v = [WIMInterop.VirtualDisk]::OpenVirtualDisk($isoPath)
     try {
-        if (Is-IsoFile $isoPath) {
-            $v.AttachVirtualDisk()
-            # We call Get-PSDrive to refresh the list of active drives.
-            # Otherwise, "Test-Path $driversBasePath" will return $False
-            # http://www.vistax64.com/powershell/2653-powershell-does-not-update-subst-mapped-drives.html
-            Get-PSDrive | Out-Null
+        $v.AttachVirtualDisk()
+        # We call Get-PSDrive to refresh the list of active drives.
+        # Otherwise, "Test-Path $driversBasePath" will return $False
+        # http://www.vistax64.com/powershell/2653-powershell-does-not-update-subst-mapped-drives.html
+        Get-PSDrive | Out-Null
+        if ($previousMounts) {
+            $currentMounts = Get-MountPoints $diskImageInfo.Size
+            if (!$currentMounts) {
+                throw "Failed to find $isoPath mount point"
+            }
+            $mountPoints = $currentMounts | Where-Object `
+                { $previousMounts -NotContains $_ }
+            if (!$mountPoints) {
+                throw "Failed to find new $isoPath mount point"
+            }
+            if (($mountPoints | Measure-Object).Count -gt 1) {
+                $multipleMountPoints = $true
+            }
+            $mountPoint = $mountPoints | Select-Object -First 1
+        } else {
             $devicePath = $v.GetVirtualDiskPhysicalPath()
-            $driversBasePath = Execute-Retry {
+            $mountPoint = Execute-Retry {
                 $res = (Get-DiskImage -DevicePath $devicePath `
                     | Get-Volume).DriveLetter
                 if (!$res) {
@@ -825,19 +864,31 @@ function Add-VirtIODriversFromISO {
                 }
                 return $res
             }
-            $driversBasePath += ":"
-            Write-Log "Adding drivers from $driversBasePath"
-            Add-VirtIODrivers -vhdDriveLetter $vhdDriveLetter -image $image `
-                -driversBasePath $driversBasePath
-        } else {
-            throw "The $isoPath is not a valid iso path."
+            $mountPoint += ":"
         }
+        Write-Log "Adding drivers from $mountPoint"
+        Add-VirtIODrivers -vhdDriveLetter $vhdDriveLetter -image $image `
+            -driversBasePath $mountPoint
     } catch{
         throw $_
     } finally {
         if ($v) {
-            $v.DetachVirtualDisk()
+            if (!$multipleMountPoints) {
+                if ($mountPoint) {
+                    $driveEject = New-Object -comObject Shell.Application
+                    $driveEject.Namespace(17).ParseName($mountPoint).Invokeverb("Eject")
+                    Get-PSDrive | Out-Null
+                } else {
+                    $v.DetachVirtualDisk()
+                }
+            } else {
+                Write-Log ("Warning: $isoPath has been mounted but could not be unmounted " + `
+                          "as multiple mount points were found")
+            }
             $v.Close()
+            if ($isoPath -ne $isoPathCpy) {
+                Remove-Item -Force $isoPath
+            }
         }
     }
     Write-Log "ISO Virtual Drivers have been adeed."
@@ -1587,7 +1638,7 @@ function New-WindowsCloudImage {
                     | Get-Volume).DriveLetter) + ":"
             $windowsImageConfig.wim_file_path = "$($basePath)\Sources\install.wim"
         }
-        
+
         Validate-WindowsImageConfig $windowsImageConfig
         Set-DotNetCWD
         Is-Administrator
