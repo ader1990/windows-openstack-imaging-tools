@@ -257,7 +257,7 @@ function Create-BCDBootConfig {
     )
 
     Write-Log ("Create BCDBoot Config for {0}" -f @($image.ImageName))
-    $bcdbootLocalPath = "bcdboot.exe"
+    $bcdbootLocalPath = (Get-Command "bcdboot.exe").Source
     $bcdbootPath = "${windowsDrive}\windows\system32\bcdboot.exe"
     if (!(Test-Path $bcdbootPath)) {
         Write-Warning ('"{0}" not found, using online version' -f $bcdbootPath)
@@ -267,15 +267,15 @@ function Create-BCDBootConfig {
     $ErrorActionPreference = "SilentlyContinue"
     # Note: older versions of bcdboot.exe don't have a /f argument
     if ($image.ImageVersion.Major -eq 6 -and $image.ImageVersion.Minor -lt 2) {
-       $bcdbootOutput = & $bcdbootPath ${windowsDrive}\windows /s ${systemDrive} /v
+       $bcdbootOutput = & $bcdbootPath "${windowsDrive}\windows" /s "${systemDrive}" /v
        # Note(avladu): Retry using the local bcdboot path
        # when generating Win7 images on Win10 / Server 2k16 hosts
        if ($LASTEXITCODE) {
            Write-Log "Retrying with bcdboot.exe from host"
-           $bcdbootOutput = & $bcdbootLocalPath ${windowsDrive}\windows /s ${systemDrive} /v /f $diskLayout
+           $bcdbootOutput = & $bcdbootLocalPath "${windowsDrive}\windows" /s "${systemDrive}" /v /f "$diskLayout"
        }
     } else {
-       $bcdbootOutput = & $bcdbootPath ${windowsDrive}\windows /s ${systemDrive} /v /f $diskLayout
+       $bcdbootOutput = & $bcdbootPath "${windowsDrive}\windows" /s "${systemDrive}" /v /f "$diskLayout"
     }
     if ($LASTEXITCODE) {
         $ErrorActionPreference = "Stop"
@@ -1710,8 +1710,10 @@ function New-WindowsCloudImage {
                                    -CloudbaseInitUnattendedConfigPath $windowsImageConfig.cloudbase_init_unattended_config_path
             Apply-Image -winImagePath $winImagePath -wimFilePath $windowsImageConfig.wim_file_path `
                 -imageIndex $image.ImageIndex
+
             Create-BCDBootConfig -systemDrive $drives[0] -windowsDrive $drives[1] -diskLayout $windowsImageConfig.disk_layout `
                 -image $image
+
             Check-EnablePowerShellInImage $winImagePath $image
 
             if ($windowsImageConfig.drivers_path -and (Test-Path $windowsImageConfig.drivers_path)) {
