@@ -318,6 +318,21 @@ function Transform-Xml {
     $outXmlFile.Close()
 }
 
+function Get-SupportedArch {
+    param($imageArchitecture)
+
+    $SUPPORTED_ARCHITECTURES = @{
+        "12"="arm64";
+        "amd64"="amd64";
+    }
+
+    $imageArchitectureRaw = ([string]$imageArchitecture).ToLower()
+    if (!$imageArchitectureRaw -or !$SUPPORTED_ARCHITECTURES[$imageArchitectureRaw]) {
+        throw "Architecture not supported: ${imageArchitectureRaw}"
+    }
+    return $SUPPORTED_ARCHITECTURES[$imageArchitectureRaw]
+}
+
 function Generate-UnattendXml {
     Param(
         [parameter(Mandatory=$true)]
@@ -333,9 +348,11 @@ function Generate-UnattendXml {
         $administratorPassword
     )
 
-    Write-Log "Generate Unattend Xml :$outUnattendXmlPath..."
+    $imageArchitecture = Get-SupportedArch $image.imageArchitecture
+
+    Write-Log "Generate Unattend Xml for architecture ${imageArchitecture}: '$outUnattendXmlPath'..."
     $xsltArgs = @{}
-    $xsltArgs["processorArchitecture"] = ([string]$image.ImageArchitecture).ToLower()
+    $xsltArgs["processorArchitecture"] = $imageArchitecture
     $xsltArgs["imageName"] = $image.ImageName
     $xsltArgs["versionMajor"] = $image.ImageVersion.Major
     $xsltArgs["versionMinor"] = $image.ImageVersion.Minor
@@ -548,6 +565,9 @@ function Download-CloudbaseInit {
     $msiBuildSuffix = ""
     if (-not $BetaRelease) {
         $msiBuildSuffix = "_Stable"
+    }
+    if (!$msiBuildArchMap[$osArch]) {
+        $osArch = "amd64"
     }
     $CloudbaseInitMsi = "CloudbaseInitSetup{0}_{1}.msi" -f @($msiBuildSuffix, $msiBuildArchMap[$osArch])
     $CloudbaseInitMsiUrl = "https://www.cloudbase.it/downloads/$CloudbaseInitMsi"
@@ -1688,6 +1708,7 @@ function New-WindowsCloudImage {
                 }
                 if ($productKey) {
                     $xmlParams.Add('productKey', $productKey)
+                    Write-Log "Product Key for Windows found, setting it in unatted.xml"
                 }
             }
             Generate-UnattendXml @xmlParams

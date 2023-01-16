@@ -606,7 +606,11 @@ try {
     Run-CustomScript "RunBeforeCloudbaseInitInstall.ps1"
     $Host.UI.RawUI.WindowTitle = "Installing Cloudbase-Init..."
 
-    $cloudbaseInitInstallDir = Join-Path $ENV:ProgramFiles "Cloudbase Solutions\Cloudbase-Init"
+    $cloudbaseInitInstallDirBase = $ENV:ProgramFiles
+    if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+        $cloudbaseInitInstallDirBase = ${env:ProgramFiles(x86)}
+    }
+    $cloudbaseInitInstallDir = Join-Path $cloudbaseInitInstallDirBase "Cloudbase Solutions\Cloudbase-Init"
     $CloudbaseInitMsiPath = "$resourcesDir\CloudbaseInit.msi"
     $CloudbaseInitConfigPath = "$resourcesDir\cloudbase-init.conf"
     $CloudbaseInitUnattendedConfigPath = "$resourcesDir\cloudbase-init-unattend.conf"
